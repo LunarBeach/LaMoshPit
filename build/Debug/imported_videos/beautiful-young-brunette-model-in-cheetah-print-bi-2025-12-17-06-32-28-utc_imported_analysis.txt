@@ -1,0 +1,39 @@
+=== H.264 Bitstream Analysis ===
+Analyzed: Fri Apr 10 11:14:56 2026
+Video File: C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/Debug/imported_videos/beautiful-young-brunette-model-in-cheetah-print-bi-2025-12-17-06-32-28-utc_imported.mp4
+
+NAL Units Found: 26
+
+NAL Type Distribution:
+  Type 0 (Reserved/NAL Unit Type 0): 25 occurrences
+  Type 15 (Reserved/NAL Unit Type 15): 1 occurrences
+
+Detailed NAL Unit List:
+Index	Type	Offset		Size(bytes)
+-----	----	------		----------
+0	0	0x9f6562		12
+1	0	0x9f6572		74
+2	0	0x9f65c0		22
+3	0	0x9f65da		12
+4	0	0x9f65ea		46
+5	0	0x9f661c		6
+6	0	0x9f6626		103
+7	0	0x9f6691		28
+8	0	0x9f66b1		8
+9	0	0x9f66bd		20
+10	0	0x9f66d5		12
+11	0	0x9f66e5		30
+12	0	0x9f6707		106
+13	0	0x9f6775		24
+14	0	0x9f6791		84
+15	0	0x9f6811		4
+16	0	0x9f6819		8
+17	0	0x9f6825		8
+18	0	0x9f6831		8
+19	0	0x9f683d		8
+20	0	0x9f6849		8
+21	0	0x9f6855		8
+22	0	0x9f6861		8
+23	0	0x9f686d		15
+24	15	0x9f6880		1478
+25	0	0x9f6e4a		17

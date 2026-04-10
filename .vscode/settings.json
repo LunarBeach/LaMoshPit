@@ -1,0 +1,16 @@
+{
+    "cmake.generator": "Visual Studio 17 2022",
+    "cmake.platform": "x64",
+"cmake.configureSettings": {
+    "CMAKE_TOOLCHAIN_FILE": "C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/scripts/buildsystems/vcpkg.cmake",
+    "CMAKE_PREFIX_PATH": "C:/Qt/6.11.0/msvc2022_64",
+    "VCPKG_TARGET_TRIPLET": "x64-windows",
+    "CMAKE_FIND_PACKAGE_PREFER_CONFIG": "OFF"
+},
+    "C_Cpp.default.compilerPath": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.43.34808/bin/Hostx64/x64/cl.exe",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "C:/Qt/6.11.0/msvc2022_64/include/**"
+    ],
+    "C_Cpp.default.cppStandard": "c++20"
+}

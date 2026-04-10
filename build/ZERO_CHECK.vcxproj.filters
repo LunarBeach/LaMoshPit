@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\Thelu\Desktop\CodingProjects\LaMoshPit\build\CMakeFiles\8b4b9075ba9cab10efb1ea6e7b5a4844\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{BAC07C33-47A5-350B-9238-290947B48526}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

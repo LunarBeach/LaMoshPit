@@ -1,0 +1,93 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"install"
+		],
+		"files" : 
+		[
+			"h264bitstream/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 58,
+				"parent" : 0
+			}
+		]
+	},
+	"installers" : 
+	[
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "lib",
+			"paths" : 
+			[
+				"h264bitstream/MinSizeRel/h264bitstream.lib"
+			],
+			"targetId" : "h264bitstream::@5d338881b89404efc6db",
+			"targetIndex" : 5,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "include",
+			"fileSetDirectories" : 
+			[
+				"h264bitstream"
+			],
+			"fileSetName" : "headers",
+			"fileSetTarget" : 
+			{
+				"id" : "h264bitstream::@5d338881b89404efc6db",
+				"index" : 5
+			},
+			"fileSetType" : "HEADERS",
+			"paths" : 
+			[
+				"h264bitstream/bs.h",
+				"h264bitstream/h264_avcc.h",
+				"h264bitstream/h264_sei.h",
+				"h264bitstream/h264_stream.h"
+			],
+			"type" : "fileSet"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"h264bitstream/MinSizeRel/h264_analyze.exe"
+			],
+			"targetId" : "h264_analyze::@5d338881b89404efc6db",
+			"targetIndex" : 4,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"h264bitstream/MinSizeRel/svc_split.exe"
+			],
+			"targetId" : "svc_split::@5d338881b89404efc6db",
+			"targetIndex" : 6,
+			"type" : "target"
+		}
+	],
+	"paths" : 
+	{
+		"build" : "h264bitstream",
+		"source" : "h264bitstream"
+	}
+}
