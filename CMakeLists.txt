@@ -32,12 +32,15 @@ qt_standard_project_setup()
 add_executable(LeeAnnesMoshPit WIN32
     main.cpp
     gui/MainWindow.cpp
-    gui/BitstreamAnalyzer.cpp 
+    gui/BitstreamAnalyzer.cpp
     gui/widgets/TimelineWidget.cpp
     gui/widgets/PreviewPlayer.cpp
+    gui/widgets/MacroblockWidget.cpp
+    gui/widgets/GlobalParamsWidget.cpp
     gui/widgets/PropertyPanel.cpp
-    gui/widgets/BitstreamTestWidget.cpp 
+    gui/widgets/BitstreamTestWidget.cpp
     core/pipeline/DecodePipeline.cpp
+    core/transform/FrameTransformer.cpp
 )
 
 #Link everything together
@@ -51,6 +54,11 @@ target_link_libraries(LeeAnnesMoshPit PRIVATE
     h264bitstream
     # Uses the official targets provided by vcpkg
     ${FFMPEG_LIBRARIES}
+    # swscale/swresample not always included in FFMPEG_LIBRARIES — link explicitly
+    debug   "C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/installed/x64-windows/debug/lib/swscale.lib"
+    optimized "C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/installed/x64-windows/lib/swscale.lib"
+    debug   "C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/installed/x64-windows/debug/lib/swresample.lib"
+    optimized "C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/installed/x64-windows/lib/swresample.lib"
 )
 # Add Multimedia if found
 if(HAS_MULTIMEDIA)

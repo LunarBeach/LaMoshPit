@@ -95,6 +95,17 @@ void PreviewPlayer::setupUI()
     connect(m_positionSlider, &QSlider::sliderMoved, this, &PreviewPlayer::onSliderMoved);
 }
 
+void PreviewPlayer::unloadVideo()
+{
+    m_mediaPlayer->stop();
+    m_mediaPlayer->setSource(QUrl());  // release file handle
+    m_playButton->setEnabled(false);
+    m_stopButton->setEnabled(false);
+    m_prevFrameButton->setEnabled(false);
+    m_nextFrameButton->setEnabled(false);
+    m_statusLabel->setText("Video player ready");
+}
+
 void PreviewPlayer::loadVideo(const QString &filePath)
 {
     m_currentVideoPath = filePath;

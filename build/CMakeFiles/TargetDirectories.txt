@@ -1,9 +1,0 @@
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/CMakeFiles/LeeAnnesMoshPit.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/CMakeFiles/INSTALL.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/CMakeFiles/ZERO_CHECK.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/h264bitstream/CMakeFiles/h264bitstream.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/h264bitstream/CMakeFiles/h264_analyze.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/h264bitstream/CMakeFiles/svc_split.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/h264bitstream/CMakeFiles/INSTALL.dir
-C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/build/h264bitstream/CMakeFiles/ALL_BUILD.dir

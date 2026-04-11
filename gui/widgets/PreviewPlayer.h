@@ -15,6 +15,7 @@ class PreviewPlayer : public QWidget {
 public:
     explicit PreviewPlayer(QWidget *parent = nullptr);
     void loadVideo(const QString &filePath);
+    void unloadVideo();
     void updateFrame(int frameIndex);
     void setStatus(const QString &status);
 

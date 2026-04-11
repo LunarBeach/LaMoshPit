@@ -86,9 +86,21 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
 
         // Set quality parameters
         enc_ctx->bit_rate = 6000000; // 6 Mbps
-        enc_ctx->gop_size = 12;
+
+        // Single-GOP encoding: one IDR at frame 0, no automatic keyframes thereafter.
+        // This ensures every frame in the imported video is freely transformable —
+        // no GOP boundaries will block Force-P / Force-B operations.
+        enc_ctx->gop_size    = 9999;
         enc_ctx->max_b_frames = 3;
-        
+
+        // x264-params: keyint=9999 prevents automatic IDR insertions,
+        // scenecut=0 disables scene-cut IDR detection,
+        // bframes=3 + b-adapt=2 for rich B-frame prediction structure,
+        // min-keyint=1 still allows user-forced I-frames anywhere.
+        av_opt_set(enc_ctx->priv_data, "x264-params",
+                   "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
+                   0);
+
         if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
             enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
