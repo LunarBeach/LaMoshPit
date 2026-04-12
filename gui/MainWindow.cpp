@@ -5,6 +5,7 @@
 #include "widgets/GlobalParamsWidget.h"
 #include "widgets/PropertyPanel.h"
 #include "widgets/BitstreamTestWidget.h"
+#include "widgets/QuickMoshWidget.h"
 #include "BitstreamAnalyzer.h"
 #include "core/pipeline/DecodePipeline.h"
 #include "core/transform/FrameTransformer.h"
@@ -147,9 +148,16 @@ MainWindow::MainWindow(QWidget *parent)
 
     rootLayout->addWidget(ctrlRow);
 
+    // ── Quick Mosh panel ──────────────────────────────────────────────────
+    m_quickMosh = new QuickMoshWidget(this);
+    rootLayout->addWidget(m_quickMosh);
+
     // ── Preview + MB editor + Global Params panel ─────────────────────────
     m_preview      = new PreviewPlayer(this);
     m_mbWidget     = new MacroblockWidget(this);
+    connect(m_timeline, &TimelineWidget::selectionChanged,
+            m_mbWidget, &MacroblockWidget::setActiveFrameRange);
+
     m_globalParams = new GlobalParamsWidget(this);
     m_propertyPanel = new PropertyPanel(this);
 
@@ -199,6 +207,10 @@ MainWindow::MainWindow(QWidget *parent)
     // GlobalParamsWidget "Apply" button → full re-encode with global params
     connect(m_globalParams, &GlobalParamsWidget::applyRequested,
             this, &MainWindow::onApplyGlobalParams);
+
+    // Quick Mosh panel
+    connect(m_quickMosh, &QuickMoshWidget::moshRequested,
+            this, &MainWindow::onQuickMosh);
 }
 
 MainWindow::~MainWindow()
@@ -291,8 +303,9 @@ void MainWindow::populateTimeline(const AnalysisReport& report)
     m_timeline->loadVideo(m_currentVideoPath, types, idrs);
     m_timeline->clearSelection();
     setTransformButtonsEnabled(false);
-    // "Apply MB Edits" is always available once a video is loaded
+    // "Apply MB Edits" and "Mosh Now" are always available once a video is loaded
     m_btnApplyMB->setEnabled(!m_transformBusy);
+    m_quickMosh ->setMoshEnabled(!m_transformBusy);
     m_selectionLabel->setText(
         QString("0 / %1 frames selected").arg(report.frames.size()));
 }
@@ -330,9 +343,10 @@ void MainWindow::setTransformButtonsEnabled(bool enabled)
     m_btnDelete  ->setEnabled(enabled);
     m_btnDupLeft ->setEnabled(enabled);
     m_btnDupRight->setEnabled(enabled);
-    // "Apply MB Edits" doesn't need a timeline selection — it's enabled
-    // whenever a video is loaded and the transform queue is free.
+    // "Apply MB Edits" and "Mosh Now" don't need a timeline selection —
+    // enabled whenever a video is loaded and the transform queue is free.
     m_btnApplyMB ->setEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
+    m_quickMosh  ->setMoshEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
 }
 
 // =============================================================================
@@ -352,6 +366,194 @@ void MainWindow::onApplyGlobalParams()
     // Re-encode using the GlobalEncodeParams from the panel.
     // MB edits are included at the same time (additive — both apply together).
     startTransform(FrameTransformerWorker::MBEditOnly, m_globalParams->currentParams());
+}
+
+// =============================================================================
+// Quick Mosh — build a whole-video MBEditMap from a named preset and fire it
+// =============================================================================
+
+void MainWindow::onQuickMosh(int presetIndex)
+{
+    if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
+
+    const int total = m_lastAnalysis.frames.size();
+    if (total == 0) return;
+
+    // Find the first P-frame — ideal datamosh seed (never frame 0 which is IDR).
+    int seedFrame = 1;
+    for (int i = 1; i < (int)m_lastAnalysis.frames.size(); ++i) {
+        if (m_lastAnalysis.frames[i].pictType == 'P') { seedFrame = i; break; }
+    }
+
+    // Helper: build a cascade seed entry.
+    auto makeSeed = [&](int refDepth, int ghostBlend,
+                        int mvDriftX, int mvDriftY, int mvAmplify,
+                        int noiseLevel, int pixelOffset, int invertLuma,
+                        int chromaDriftX, int chromaDriftY, int chromaOffset,
+                        int qpDelta, int spillRadius, int sampleRadius,
+                        int refScatter, int blockFlatten,
+                        int colorTwistU, int colorTwistV,
+                        int cascadeLen, int cascadeDecay) -> FrameMBParams {
+        FrameMBParams p;
+        // selectedMBs intentionally empty — global mode (all MBs) in renderer
+        p.refDepth     = refDepth;
+        p.ghostBlend   = ghostBlend;
+        p.mvDriftX     = mvDriftX;
+        p.mvDriftY     = mvDriftY;
+        p.mvAmplify    = mvAmplify;
+        p.noiseLevel   = noiseLevel;
+        p.pixelOffset  = pixelOffset;
+        p.invertLuma   = invertLuma;
+        p.chromaDriftX = chromaDriftX;
+        p.chromaDriftY = chromaDriftY;
+        p.chromaOffset = chromaOffset;
+        p.qpDelta      = qpDelta;
+        p.spillRadius  = spillRadius;
+        p.sampleRadius = sampleRadius;
+        p.refScatter   = refScatter;
+        p.blockFlatten = blockFlatten;
+        p.colorTwistU  = colorTwistU;
+        p.colorTwistV  = colorTwistV;
+        p.cascadeLen   = cascadeLen;
+        p.cascadeDecay = cascadeDecay;
+        return p;
+    };
+
+    // Helper: stamp the same params on every frame (no cascade).
+    auto stampAll = [&](MBEditMap& em, const FrameMBParams& tmpl) {
+        for (int i = 0; i < total; ++i)
+            em[i] = tmpl;
+    };
+
+    const int fullCascade = total - seedFrame - 1; // cascade covers rest of video
+
+    MBEditMap edits;
+
+    // Preset index must match QuickMoshWidget kMeta order exactly.
+    switch (presetIndex) {
+    case 0: // Ghost Smear
+        edits[seedFrame] = makeSeed(
+            /*rd*/1, /*ghost*/80, /*mvX*/0, /*mvY*/0, /*amp*/1,
+            /*noise*/0, /*pxOff*/0, /*inv*/0,
+            /*cxX*/0, /*cxY*/0, /*cOff*/0,
+            /*qp*/0, /*spill*/0, /*sample*/0, /*scatter*/0, /*flatten*/0,
+            /*twU*/0, /*twV*/0,
+            /*cascLen*/fullCascade, /*cascDec*/28);
+        break;
+
+    case 1: // MV Liquify →
+        edits[seedFrame] = makeSeed(
+            1, 40, 70, 0, 3,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 0, 0, 0,
+            0, 0,
+            fullCascade, 15);
+        break;
+
+    case 2: // MV Liquify ↓
+        edits[seedFrame] = makeSeed(
+            1, 40, 0, 70, 3,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 0, 0, 0,
+            0, 0,
+            fullCascade, 15);
+        break;
+
+    case 3: // Chroma Bleed
+        edits[seedFrame] = makeSeed(
+            1, 30, 0, 0, 1,
+            0, 0, 0,
+            45, -25, 20,
+            0, 0, 0, 0, 0,
+            0, 0,
+            fullCascade, 32);
+        break;
+
+    case 4: // Vortex
+        edits[seedFrame] = makeSeed(
+            1, 50, 30, -30, 4,
+            60, 20, 0,
+            0, 0, 0,
+            20, 3, 0, 0, 0,
+            0, 0,
+            fullCascade, 35);
+        break;
+
+    case 5: // Scatter Dissolve
+        edits[seedFrame] = makeSeed(
+            1, 50, 0, 0, 1,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 15, 25, 0,
+            0, 0,
+            fullCascade, 40);
+        break;
+
+    case 6: // Full Freeze
+        edits[seedFrame] = makeSeed(
+            1, 100, 0, 0, 1,
+            0, 0, 0,
+            0, 0, 0,
+            51, 0, 0, 0, 0,
+            0, 0,
+            fullCascade, 0);
+        break;
+
+    case 7: { // Pixel Disintegrate — stamp every frame
+        FrameMBParams tmpl = makeSeed(
+            0, 0, 0, 0, 1,
+            160, 30, 0,
+            0, 0, 0,
+            45, 0, 0, 0, 0,
+            0, 0,
+            0, 0);
+        stampAll(edits, tmpl);
+        break;
+    }
+
+    case 8: { // UV Colour Twist — stamp every frame
+        FrameMBParams tmpl = makeSeed(
+            1, 30, 0, 0, 1,
+            0, 0, 0,
+            0, 0, 15,
+            0, 0, 0, 0, 0,
+            50, -50,
+            0, 0);
+        stampAll(edits, tmpl);
+        break;
+    }
+
+    case 9: { // Block Melt — stamp every frame
+        FrameMBParams tmpl = makeSeed(
+            0, 0, 0, 0, 1,
+            80, 0, 0,
+            0, 0, 0,
+            40, 0, 0, 0, 80,
+            0, 0,
+            0, 0);
+        stampAll(edits, tmpl);
+        break;
+    }
+
+    default:
+        return;
+    }
+
+    // Push the edit map into the MB editor so the user can see and adjust it.
+    m_mbWidget->loadEditMap(edits);
+
+    // Build encode params — start from whatever the user has configured in the
+    // GlobalParams panel, then unconditionally enforce the two settings that
+    // datamoshing fundamentally requires regardless of panel state:
+    //   killIFrames=true  — without this x264 resets the smear at every I-frame
+    //   gopSize=0         — infinite GOP (keyint=9999); prevents periodic keyframes
+    // Users can still override these in the panel between mosh passes if wanted.
+    GlobalEncodeParams gp = m_globalParams->currentParams();
+    gp.killIFrames = true;
+    gp.gopSize     = 0;   // → keyint=9999:min-keyint=9999:scenecut=0 in encoder
+    startTransform(FrameTransformerWorker::MBEditOnly, gp);
 }
 
 void MainWindow::startTransform(FrameTransformerWorker::TargetType type,

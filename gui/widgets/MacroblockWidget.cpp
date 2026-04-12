@@ -1,5 +1,7 @@
 #include "MacroblockWidget.h"
 
+#include "core/logger/ControlLogger.h"
+
 #include <QPainter>
 #include <QMouseEvent>
 #include <QVBoxLayout>
@@ -11,6 +13,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QGroupBox>
+#include <QComboBox>
 #include <QtConcurrent/QtConcurrent>
 #include <QDebug>
 
@@ -575,40 +578,65 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     // ── Connect all knobs (dial + spinbox) to m_edits via member pointer ────────
     // Both dial AND spinbox trigger the same field update; the sync lambdas inside
     // makeKnob use blockSignals so only one of the two fires per user interaction.
-    auto connectKnobs = [this](QDial* d, QSpinBox* sb, int FrameMBParams::* field) {
-        auto update = [this, field](int v) { m_edits[m_currentFrame].*field = v; };
+    // The name string is forwarded to ControlLogger for human-readable log output.
+    auto connectKnobs = [this](QDial* d, QSpinBox* sb, int FrameMBParams::* field,
+                                const QString& name) {
+        auto update = [this, field, name](int v) {
+            // Write to every frame in the active timeline range so that a
+            // multi-frame selection gets the same value without the user having
+            // to navigate to each frame individually.
+            const QVector<int>& range = m_activeRange.isEmpty()
+                                        ? QVector<int>{m_currentFrame}
+                                        : m_activeRange;
+            for (int fi : range) {
+                int& target = m_edits[fi].*field;
+                int  oldVal = target;
+                target = v;
+                if (fi == m_currentFrame)
+                    ControlLogger::instance().logKnobChange(name, fi, oldVal, v);
+            }
+        };
         connect(d,  &QDial::valueChanged,
                 this, update);
         connect(sb, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, update);
     };
 
-    connectKnobs(m_dialQP,     m_sbQP,     &FrameMBParams::qpDelta);
-    connectKnobs(m_dialRef,    m_sbRef,    &FrameMBParams::refDepth);
-    connectKnobs(m_dialGhost,  m_sbGhost,  &FrameMBParams::ghostBlend);
-    connectKnobs(m_dialMVX,    m_sbMVX,    &FrameMBParams::mvDriftX);
-    connectKnobs(m_dialMVY,    m_sbMVY,    &FrameMBParams::mvDriftY);
-    connectKnobs(m_dialNoise,  m_sbNoise,  &FrameMBParams::noiseLevel);
-    connectKnobs(m_dialPxOff,  m_sbPxOff,  &FrameMBParams::pixelOffset);
-    connectKnobs(m_dialInvert, m_sbInvert, &FrameMBParams::invertLuma);
-    connectKnobs(m_dialChrX,   m_sbChrX,   &FrameMBParams::chromaDriftX);
-    connectKnobs(m_dialChrY,   m_sbChrY,   &FrameMBParams::chromaDriftY);
-    connectKnobs(m_dialChrOff, m_sbChrOff, &FrameMBParams::chromaOffset);
-    connectKnobs(m_dialSpill,        m_sbSpill,        &FrameMBParams::spillRadius);
-    connectKnobs(m_dialSampleRadius, m_sbSampleRadius, &FrameMBParams::sampleRadius);
-    connectKnobs(m_dialMVAmp, m_sbMVAmp, &FrameMBParams::mvAmplify);
-    connectKnobs(m_dialBlockFlatten, m_sbBlockFlatten, &FrameMBParams::blockFlatten);
-    connectKnobs(m_dialRefScatter,   m_sbRefScatter,   &FrameMBParams::refScatter);
-    connectKnobs(m_dialColorTwistU,  m_sbColorTwistU,  &FrameMBParams::colorTwistU);
-    connectKnobs(m_dialColorTwistV,  m_sbColorTwistV,  &FrameMBParams::colorTwistV);
+    connectKnobs(m_dialQP,     m_sbQP,     &FrameMBParams::qpDelta,      "QP Delta");
+    connectKnobs(m_dialRef,    m_sbRef,    &FrameMBParams::refDepth,     "Ref Depth");
+    connectKnobs(m_dialGhost,  m_sbGhost,  &FrameMBParams::ghostBlend,   "Ghost Blend");
+    connectKnobs(m_dialMVX,    m_sbMVX,    &FrameMBParams::mvDriftX,     "MV Drift X");
+    connectKnobs(m_dialMVY,    m_sbMVY,    &FrameMBParams::mvDriftY,     "MV Drift Y");
+    connectKnobs(m_dialNoise,  m_sbNoise,  &FrameMBParams::noiseLevel,   "Noise Level");
+    connectKnobs(m_dialPxOff,  m_sbPxOff,  &FrameMBParams::pixelOffset,  "Pixel Offset");
+    connectKnobs(m_dialInvert, m_sbInvert, &FrameMBParams::invertLuma,   "Invert Luma");
+    connectKnobs(m_dialChrX,   m_sbChrX,   &FrameMBParams::chromaDriftX, "Chroma Drift X");
+    connectKnobs(m_dialChrY,   m_sbChrY,   &FrameMBParams::chromaDriftY, "Chroma Drift Y");
+    connectKnobs(m_dialChrOff, m_sbChrOff, &FrameMBParams::chromaOffset, "Chroma Offset");
+    connectKnobs(m_dialSpill,        m_sbSpill,        &FrameMBParams::spillRadius,  "Spill Radius");
+    connectKnobs(m_dialSampleRadius, m_sbSampleRadius, &FrameMBParams::sampleRadius, "Sample Radius");
+    connectKnobs(m_dialMVAmp,        m_sbMVAmp,        &FrameMBParams::mvAmplify,    "MV Amplify");
+    connectKnobs(m_dialBlockFlatten, m_sbBlockFlatten, &FrameMBParams::blockFlatten, "Block Flatten");
+    connectKnobs(m_dialRefScatter,   m_sbRefScatter,   &FrameMBParams::refScatter,   "Ref Scatter");
+    connectKnobs(m_dialColorTwistU,  m_sbColorTwistU,  &FrameMBParams::colorTwistU,  "Color Twist U");
+    connectKnobs(m_dialColorTwistV,  m_sbColorTwistV,  &FrameMBParams::colorTwistV,  "Color Twist V");
 
     // ── Transient slider connections ──────────────────────────────────────────
+    // Cascade controls are seed-specific envelope params — they must NOT
+    // propagate across the active frame range.  Broadcasting cascadeLen to 300
+    // frames turns every frame into its own seed, and the cascade guard
+    // (activeEdits.contains) then blocks all synthetic descendant generation,
+    // making the cascade a no-op.  Always write to m_currentFrame only.
     connect(m_sliderTransLen, &QSlider::valueChanged, this, [this](int v) {
+        int oldVal = m_edits[m_currentFrame].cascadeLen;
         m_edits[m_currentFrame].cascadeLen = v;
+        ControlLogger::instance().logKnobChange("Cascade Length", m_currentFrame, oldVal, v);
         m_lblTransLen->setText(QString::number(v) + " frames");
     });
     connect(m_sliderTransDecay, &QSlider::valueChanged, this, [this](int v) {
+        int oldVal = m_edits[m_currentFrame].cascadeDecay;
         m_edits[m_currentFrame].cascadeDecay = v;
+        ControlLogger::instance().logKnobChange("Cascade Decay", m_currentFrame, oldVal, v);
         // Show the shape description
         QString desc;
         if      (v == 0)   desc = "0% (flat)";
@@ -620,6 +648,107 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     });
 
     // ── Brush size + Clear controls ────────────────────────────────────────────
+    // ── Preset row ────────────────────────────────────────────────────────────
+    // Each preset populates all knobs with named datamosh algorithm values.
+    // selectedMBs is left empty — empty = global mode in the renderer.
+    // Uses a plain POD struct so aggregate initialisation works safely.
+    struct PresetData {
+        const char* name;
+        // Field order matches FrameMBParams (excluding selectedMBs):
+        int qpDelta, refDepth, ghostBlend, mvDriftX, mvDriftY, mvAmplify;
+        int noiseLevel, pixelOffset, invertLuma;
+        int chromaDriftX, chromaDriftY, chromaOffset;
+        int spillRadius, sampleRadius;
+        int cascadeLen, cascadeDecay;
+        int blockFlatten, refScatter, colorTwistU, colorTwistV;
+    };
+    static const PresetData kPresets[] = {
+        //                        qp  rd ghost  mvX  mvY amp  nz  px  inv  cxX  cxY  cOf  sp  sr  cl  cd  bf  rs  tu  tv
+        { "Ghost Trail",           0,  1,  80,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 40, 50,  0,  0,  0,  0 },
+        { "MV Melt \xe2\x86\x92",  0,  1,   0,  60,   0,  3,   0,  0,   0,   0,   0,   0,  2,  0, 20, 30,  0,  0,  0,  0 },
+        { "Chroma Ghost",          0,  1,  40,   0,   0,  1,   0,  0,   0,  35, -20,  15,  0,  0, 25, 40,  0,  0,  0,  0 },
+        { "Pixel Melt",           51,  0,   0,   0,   0,  1, 180, 40,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+        { "Full Freeze",          51,  1, 100,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+        { "Scatter Wave",          0,  1,   0,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
+        { "UV Colour Twist",       0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 20, 45,  0,  0, 40, 40 },
+        { "Vortex",               20,  1,  50,  30, -30,  4,  60, 20,   0,   0,   0,   0,  3,  0, 35, 55,  0,  0,  0,  0 },
+    };
+
+    auto* presetLabel = new QLabel("Preset:", this);
+    presetLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
+    auto* presetCombo = new QComboBox(this);
+    presetCombo->addItem("— choose preset —");
+    for (const auto& pr : kPresets) presetCombo->addItem(pr.name);
+    presetCombo->setStyleSheet(
+        "QComboBox { background:#1a1a1a; color:#ff88ff; border:1px solid #663366; "
+        "font:8pt 'Consolas'; padding:1px 4px; }"
+        "QComboBox::drop-down { border:none; }"
+        "QComboBox QAbstractItemView { background:#1a1a1a; color:#ff88ff; "
+        "selection-background-color:#441144; font:8pt 'Consolas'; }");
+
+    auto* presetRow = new QHBoxLayout;
+    presetRow->setSpacing(6);
+    presetRow->addWidget(presetLabel);
+    presetRow->addWidget(presetCombo, 1);
+    root->addLayout(presetRow);
+
+    connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, presetCombo](int idx) {
+        if (idx <= 0) return;
+        static const PresetData kP[] = {
+            {nullptr,  0,  1,  80,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 40, 50,  0,  0,  0,  0 },
+            {nullptr,  0,  1,   0,  60,   0,  3,   0,  0,   0,   0,   0,   0,  2,  0, 20, 30,  0,  0,  0,  0 },
+            {nullptr,  0,  1,  40,   0,   0,  1,   0,  0,   0,  35, -20,  15,  0,  0, 25, 40,  0,  0,  0,  0 },
+            {nullptr, 51,  0,   0,   0,   0,  1, 180, 40,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+            {nullptr, 51,  1, 100,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+            {nullptr,  0,  1,   0,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
+            {nullptr,  0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 20, 45,  0,  0, 40, 40 },
+            {nullptr, 20,  1,  50,  30, -30,  4,  60, 20,   0,   0,   0,   0,  3,  0, 35, 55,  0,  0,  0,  0 },
+        };
+        const int pi = idx - 1;
+        if (pi < 0 || pi >= (int)(sizeof(kP)/sizeof(kP[0]))) return;
+        const PresetData& pr = kP[pi];
+
+        for (QDial*    d : m_allDials)     d->blockSignals(true);
+        for (QSpinBox* s : m_allSpinboxes) s->blockSignals(true);
+
+        const QVector<int>& range = m_activeRange.isEmpty()
+                                    ? QVector<int>{m_currentFrame}
+                                    : m_activeRange;
+        for (int fi : range) {
+            FrameMBParams& ep = m_edits[fi];
+            ep.qpDelta      = pr.qpDelta;
+            ep.refDepth     = pr.refDepth;
+            ep.ghostBlend   = pr.ghostBlend;
+            ep.mvDriftX     = pr.mvDriftX;
+            ep.mvDriftY     = pr.mvDriftY;
+            ep.mvAmplify    = pr.mvAmplify;
+            ep.noiseLevel   = pr.noiseLevel;
+            ep.pixelOffset  = pr.pixelOffset;
+            ep.invertLuma   = pr.invertLuma;
+            ep.chromaDriftX = pr.chromaDriftX;
+            ep.chromaDriftY = pr.chromaDriftY;
+            ep.chromaOffset = pr.chromaOffset;
+            ep.spillRadius  = pr.spillRadius;
+            ep.sampleRadius = pr.sampleRadius;
+            ep.cascadeLen   = pr.cascadeLen;
+            ep.cascadeDecay = pr.cascadeDecay;
+            ep.blockFlatten = pr.blockFlatten;
+            ep.refScatter   = pr.refScatter;
+            ep.colorTwistU  = pr.colorTwistU;
+            ep.colorTwistV  = pr.colorTwistV;
+        }
+
+        for (QDial*    d : m_allDials)     d->blockSignals(false);
+        for (QSpinBox* s : m_allSpinboxes) s->blockSignals(false);
+
+        loadKnobsFromCurrentFrame();
+
+        QSignalBlocker sb(presetCombo);
+        presetCombo->setCurrentIndex(0);
+    });
+
+    // ── Brush / clear row ─────────────────────────────────────────────────────
     auto* ctrlRow = new QHBoxLayout;
     ctrlRow->setSpacing(6);
 
@@ -674,6 +803,7 @@ MacroblockWidget::~MacroblockWidget()
 void MacroblockWidget::setVideo(const QString& videoPath,
                                  const AnalysisReport& report)
 {
+    ControlLogger::instance().beginSession(videoPath);
     m_watcher->cancel();
     m_watcher->waitForFinished();
 
@@ -862,8 +992,22 @@ QSet<int> MacroblockWidget::currentSelection() const
 
 void MacroblockWidget::onMBSelectionChanged(const QSet<int>& sel)
 {
+    int oldCount = m_edits.value(m_currentFrame).selectedMBs.size();
     m_edits[m_currentFrame].selectedMBs = sel;
+    ControlLogger::instance().logMBSelectionChange(m_currentFrame, oldCount, sel.size());
     emit mbSelectionChanged(sel);
+}
+
+void MacroblockWidget::setActiveFrameRange(const QVector<int>& frames)
+{
+    m_activeRange = frames;
+}
+
+void MacroblockWidget::loadEditMap(const MBEditMap& edits)
+{
+    m_edits = edits;
+    loadKnobsFromCurrentFrame();
+    m_canvas->loadSelection(m_edits.value(m_currentFrame).selectedMBs);
 }
 
 // =============================================================================

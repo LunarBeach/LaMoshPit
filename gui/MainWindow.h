@@ -13,6 +13,7 @@ class MacroblockWidget;
 class GlobalParamsWidget;
 class PropertyPanel;
 class BitstreamTestWidget;
+class QuickMoshWidget;
 class QPushButton;
 class QProgressBar;
 class QLabel;
@@ -50,6 +51,7 @@ private slots:
 
     // Global params apply
     void onApplyGlobalParams();
+    void onQuickMosh(int presetIndex);
 
 private:
     void analyzeImportedVideo(const QString& videoPath);
@@ -66,6 +68,7 @@ private:
     GlobalParamsWidget*  m_globalParams;
     PropertyPanel*       m_propertyPanel;
     BitstreamTestWidget* m_bitstreamTest;
+    QuickMoshWidget*     m_quickMosh;
 
     // ── Conversion controls ───────────────────────────────────────────────
     QPushButton*  m_btnForceI;

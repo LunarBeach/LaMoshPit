@@ -105,4 +105,7 @@ private:
     QSet<int>       m_spatialMask;
 
     QPushButton*    m_btnApply;
+
+    // ── Debug logging toggle ───────────────────────────────────────────────────
+    QCheckBox*      m_cbDebugLog;
 };

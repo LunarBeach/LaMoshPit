@@ -1,5 +1,7 @@
 #include "FrameTransformer.h"
 
+#include "core/logger/ControlLogger.h"
+
 #include <QFile>
 #include <QDebug>
 #include <QSet>
@@ -468,12 +470,24 @@ static void applyMBEdits(AVFrame* frame, int frameIdx,
     auto it = edits.constFind(frameIdx);
     if (it == edits.constEnd()) return;
     const FrameMBParams& p = *it;
-    if (p.selectedMBs.isEmpty()) return;
+
+    // Log the complete parameter state for this frame before any pixel work.
+    ControlLogger::instance().logFrameEditApplied(frameIdx, p, mbCols, mbRows);
+
+    // Resolve the working MB set.
+    // Empty selectedMBs = global mode: every MB in the frame is affected.
+    QSet<int> fullFrame;
+    const QSet<int>* baseMBs = &p.selectedMBs;
+    if (p.selectedMBs.isEmpty()) {
+        fullFrame.reserve(mbCols * mbRows);
+        for (int i = 0; i < mbCols * mbRows; ++i) fullFrame.insert(i);
+        baseMBs = &fullFrame;
+    }
 
     // Expand selection by spill radius (blast radius — this MB infects neighbours)
     const QSet<int>& mbs = (p.spillRadius > 0)
-        ? expandedMBs(p.selectedMBs, p.spillRadius, mbCols, mbRows)
-        : p.selectedMBs;
+        ? expandedMBs(*baseMBs, p.spillRadius, mbCols, mbRows)
+        : *baseMBs;
 
     // Resolve reference frame (shared by MV drift, ghost blend, chroma drift)
     const AVFrame* ref = nullptr;
@@ -533,6 +547,9 @@ static void applyMBEdits(AVFrame* frame, int frameIdx,
 // ── Main re-encode work ────────────────────────────────────────────────────
 void FrameTransformerWorker::run()
 {
+    // Log Apply start — records total frames and how many carry edits.
+    ControlLogger::instance().logApplyStarted(m_totalFrames, m_mbEdits.size());
+
     const QString tempPath = m_videoPath + ".xform_tmp.mp4";
     QString errorMsg;
     bool    ok   = false;
@@ -613,7 +630,14 @@ void FrameTransformerWorker::run()
         // in CRF mode because the rate controller doesn't compensate elsewhere.
         // If qpOverride >= 0, switch to fixed-CQP mode (no rate control at all).
         encCtx->bit_rate     = 0;
-        encCtx->max_b_frames = (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
+        // When killing I-frames for datamoshing, B-frames must be disabled.
+        // x264's B-frame adaptive lookahead (b-adapt=2) can insert I-frames to
+        // anchor the B-frame reference chain, even when every individual frame is
+        // hinted as AV_PICTURE_TYPE_P.  With bframes=0 x264 encodes in strict
+        // decode order with no reordering, so pict_type hints are applied exactly.
+        const bool killI = m_globalParams.killIFrames;
+        encCtx->max_b_frames = killI ? 0
+                             : (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
 
         if (m_globalParams.qpOverride >= 0) {
             av_opt_set(encCtx->priv_data, "qp",
@@ -643,10 +667,18 @@ void FrameTransformerWorker::run()
         // ── Build x264-params string from GlobalEncodeParams ─────────────────
         QString x264p;
         // Frame structure
-        x264p += QString("keyint=%1:min-keyint=1:scenecut=0:").arg(gopSize);
+        // min-keyint must match keyint — if min-keyint < keyint, x264 is free to
+        // insert keyframes early (on scene transitions etc.) even with scenecut=0.
+        // For datamoshing this silently resets the smear wherever x264 decides
+        // to place an early keyframe.
+        x264p += QString("keyint=%1:min-keyint=%1:scenecut=0:").arg(gopSize);
         {
-            int bf = (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
-            int ba = (m_globalParams.bAdapt  >= 0) ? m_globalParams.bAdapt  : 2;
+            // When killing I-frames: force bframes=0, b-adapt=0.
+            // x264's B-frame lookahead (b-adapt=2) inserts I-frames to anchor
+            // the B-frame reference chain even with scenecut=0 and forced P
+            // pict_type hints.  No B-frames = no lookahead = no surprise I-frames.
+            int bf = killI ? 0 : (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
+            int ba = killI ? 0 : (m_globalParams.bAdapt  >= 0) ? m_globalParams.bAdapt  : 2;
             x264p += QString("bframes=%1:b-adapt=%2:").arg(bf).arg(ba);
         }
         if (m_globalParams.refFrames > 0)
@@ -752,21 +784,27 @@ void FrameTransformerWorker::run()
         // and emits skip macroblocks — this is how professional datamoshing
         // achieves indefinite temporal smear.
         //
-        // retainPerFrame maps cascadeDecay 0→100 to 1.0→0.5 (exponential decay).
-        // With cascadeDecay=0: every cascade frame has full intensity.
-        // With cascadeDecay=100: each frame retains ~50 % of the previous one.
+        // cascadeDecay interpretation (linear fade over cascadeLen frames):
+        //   cascadeDecay=0   → constant full intensity throughout cascade
+        //   cascadeDecay=50  → effect fades to 50 % intensity at the final frame
+        //   cascadeDecay=100 → effect fades linearly to zero at the final frame
+        // This means cascadeLen actually controls duration — the cascade runs for
+        // exactly cascadeLen frames regardless of the decay setting, which matches
+        // user intuition when they set a large cascadeLen expecting a long smear.
         MBEditMap activeEdits = m_mbEdits;
         for (auto it = m_mbEdits.constBegin(); it != m_mbEdits.constEnd(); ++it) {
             const FrameMBParams& src = it.value();
             if (src.cascadeLen <= 0) continue;
-            float retain = 1.0f - (float)src.cascadeDecay / 200.0f; // 1.0..0.5
-            retain = qBound(0.01f, retain, 1.0f);
             for (int k = 1; k <= src.cascadeLen; ++k) {
                 int ci = it.key() + k;
                 if (ci >= m_totalFrames) break;
                 if (activeEdits.contains(ci)) continue; // honour explicit edits
-                float f = std::pow(retain, (float)k);
-                if (f < 0.02f) break;                 // negligible, stop early
+                // Linear fade: at k=1 intensity ≈ 1.0, at k=cascadeLen it is
+                // (1 - cascadeDecay/100).  cascadeDecay=0 → constant smear.
+                float f = 1.0f - (src.cascadeDecay / 100.0f)
+                               * ((float)k / (float)src.cascadeLen);
+                f = qBound(0.0f, f, 1.0f);
+                if (f < 0.01f) break; // absolute floor — only hits at cascadeDecay=100
 
                 FrameMBParams c;
                 c.selectedMBs  = src.selectedMBs;
@@ -894,11 +932,17 @@ void FrameTransformerWorker::run()
 
                         } else if (m_targetType == MBEditOnly) {
                             // ── MB Edits Only ────────────────────────────
-                            // Re-encode every frame with encoder-chosen types
-                            // (pict_type=NONE = let libx264 decide).  MB edits
-                            // from the edit map are applied wherever present.
-                            // The "selection" is unused for this mode.
-                            frame->pict_type = AV_PICTURE_TYPE_NONE;
+                            // When killIFrames is active, force every non-IDR frame
+                            // to AV_PICTURE_TYPE_P so x264 uses inter-prediction
+                            // throughout.  Setting NONE here would let x264 insert
+                            // I-frames at its own schedule, overriding the killIFrames
+                            // request and resetting the datamosh effect at every GOP.
+                            // Frame 0 is always left as NONE — it is the mandatory
+                            // stream IDR and x264 cannot encode it as P or B.
+                            if (m_globalParams.killIFrames && frameIdx > 0)
+                                frame->pict_type = AV_PICTURE_TYPE_P;
+                            else
+                                frame->pict_type = AV_PICTURE_TYPE_NONE;
                             applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
                             encodeAndDrain(frame);
 
@@ -993,5 +1037,6 @@ cleanup:
         QFile::remove(tempPath);
     }
 
+    ControlLogger::instance().logApplyCompleted(ok);
     emit done(ok, errorMsg);
 }

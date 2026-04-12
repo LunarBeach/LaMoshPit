@@ -27,7 +27,12 @@ PreviewPlayer::PreviewPlayer(QWidget *parent)
     , m_duration(0)
 {
     setupUI();
-    
+
+    // Wire the video output once here — calling setVideoOutput after setSource
+    // on the WMF backend can silently drop the pipeline, so we set it up once
+    // at construction and never touch it again.
+    m_mediaPlayer->setVideoOutput(m_videoWidget);
+
     // Connect media player signals
     connect(m_mediaPlayer, &QMediaPlayer::positionChanged, this, &PreviewPlayer::onPositionChanged);
     connect(m_mediaPlayer, &QMediaPlayer::durationChanged, this, &PreviewPlayer::onDurationChanged);
@@ -110,18 +115,23 @@ void PreviewPlayer::loadVideo(const QString &filePath)
 {
     m_currentVideoPath = filePath;
     QString fileName = QFileInfo(filePath).fileName();
-    
-    // Load the video file
+
+    // Cache-bust the WMF backend: clearing the source before setting a new one
+    // forces WMF to fully release the previous file handle and pipeline state.
+    m_mediaPlayer->setSource(QUrl());
     m_mediaPlayer->setSource(QUrl::fromLocalFile(filePath));
-    m_mediaPlayer->setVideoOutput(m_videoWidget);
-    
+
     // Enable controls
     m_playButton->setEnabled(true);
     m_stopButton->setEnabled(true);
     m_prevFrameButton->setEnabled(true);
     m_nextFrameButton->setEnabled(true);
-    
+
     m_statusLabel->setText("Loaded: " + fileName);
+
+    // Auto-play so the re-encoded result is immediately visible after Apply.
+    m_mediaPlayer->play();
+    m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPause));
 }
 
 void PreviewPlayer::playPause()

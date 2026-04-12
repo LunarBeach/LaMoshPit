@@ -39,8 +39,10 @@ add_executable(LeeAnnesMoshPit WIN32
     gui/widgets/GlobalParamsWidget.cpp
     gui/widgets/PropertyPanel.cpp
     gui/widgets/BitstreamTestWidget.cpp
+    gui/widgets/QuickMoshWidget.cpp
     core/pipeline/DecodePipeline.cpp
     core/transform/FrameTransformer.cpp
+    core/logger/ControlLogger.cpp
 )
 
 #Link everything together

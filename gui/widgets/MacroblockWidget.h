@@ -49,6 +49,10 @@ public:
     // Snapshot of all per-frame MB edits passed to FrameTransformerWorker.
     const MBEditMap& editMap() const { return m_edits; }
 
+    // Replace the entire edit map (used by Quick Mosh to inject preset edits).
+    // Reloads knob displays and canvas selection for the current frame.
+    void loadEditMap(const MBEditMap& edits);
+
     // Clear every edit on every frame.
     void clearAllEdits();
 
@@ -58,6 +62,10 @@ public:
 
     // The MB selection on the currently-displayed frame (for spatial mask capture).
     QSet<int> currentSelection() const;
+
+    // Called by MainWindow whenever the timeline selection changes so that
+    // knob edits are replicated across every frame in the active range.
+    void setActiveFrameRange(const QVector<int>& frames);
 
 signals:
     // Emitted when the user navigates via Prev/Next buttons.
@@ -88,6 +96,7 @@ private:
     QVector<char> m_frameTypes;
     int           m_currentFrame = 0;
     MBEditMap     m_edits;
+    QVector<int>  m_activeRange; // frames in current timeline selection
 
     QFutureWatcher<QImage>* m_watcher = nullptr;
 

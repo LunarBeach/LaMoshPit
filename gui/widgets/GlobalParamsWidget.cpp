@@ -1,5 +1,7 @@
 #include "GlobalParamsWidget.h"
 
+#include "core/logger/ControlLogger.h"
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -196,6 +198,26 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
             "cannot use intra prediction anywhere except the first frame.\n"
             "Essential for classic datamoshing — combine with 'Infinite GOP' preset.");
         root->addWidget(m_cbKillIFrames);
+    }
+
+    // ── Control Debug Logging toggle ─────────────────────────────────────────
+    {
+        m_cbDebugLog = new QCheckBox("Enable Control Debug Logging", this);
+        m_cbDebugLog->setChecked(false);
+        m_cbDebugLog->setStyleSheet(
+            "QCheckBox { color:#44ffaa; font:bold 7pt 'Consolas'; }"
+            "QCheckBox::indicator { width:12px; height:12px; background:#1a1a1a; "
+            "border:1px solid #44ffaa; border-radius:2px; }"
+            "QCheckBox::indicator:checked { background:#44ffaa; }");
+        m_cbDebugLog->setToolTip(
+            "Logs every knob change, MB paint stroke, and full frame-parameter dump\n"
+            "to the VS Code Debug Console AND to:\n"
+            "  <exe-dir>/logs/LaMoshPit_ControlTest_Log.txt\n\n"
+            "OFF by default (zero performance impact when unchecked).");
+        root->addWidget(m_cbDebugLog);
+
+        connect(m_cbDebugLog, &QCheckBox::toggled,
+                this, [](bool on) { ControlLogger::instance().setEnabled(on); });
     }
 
     // ── Scrollable parameter area ────────────────────────────────────────────
