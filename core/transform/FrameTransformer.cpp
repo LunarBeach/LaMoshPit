@@ -650,10 +650,18 @@ void FrameTransformerWorker::run()
         if (m_globalParams.qpMax >= 0)
             encCtx->qmax = m_globalParams.qpMax;
 
-        // GOP size: default 250, override if requested.
-        // gopSize=0 → effective infinite GOP (keyint=9999, scenecut off).
-        const int gopSize = (m_globalParams.gopSize == 0) ? 9999
-                          : (m_globalParams.gopSize  >  0) ? m_globalParams.gopSize
+        // GOP size.
+        // When killIFrames is active we must use an infinite GOP (keyint=9999)
+        // regardless of the gopSize setting.  x264 WILL insert a forced IDR at
+        // every keyint boundary even when every frame is hinted as
+        // AV_PICTURE_TYPE_P — the keyint schedule is applied after frame-type
+        // decisions and cannot be overridden by pict_type alone.  With a 335-
+        // frame clip and the default gopSize=250 this produces an I-frame at
+        // frame 250 every single encode, which is exactly what the user sees.
+        // gopSize=0 is the user-visible "infinite GOP" option; killIFrames
+        // also forces it internally.
+        const int gopSize = (killI || m_globalParams.gopSize == 0) ? 9999
+                          : (m_globalParams.gopSize > 0) ? m_globalParams.gopSize
                           : 250;
         encCtx->gop_size = gopSize;
 
@@ -906,10 +914,16 @@ void FrameTransformerWorker::run()
 
                         if (m_targetType <= ForceB) {
                             // ── Force I/P/B ──────────────────────────────
-                            if (inSel)
+                            if (inSel) {
                                 applyForceType(frame, m_targetType);
-                            else
+                            } else if (m_globalParams.killIFrames && frameIdx > 0) {
+                                // Non-selected frames: still honour killIFrames so
+                                // x264 doesn't auto-upgrade them to I at any boundary.
+                                frame->pict_type = AV_PICTURE_TYPE_P;
+                                frame->flags    &= ~AV_FRAME_FLAG_KEY;
+                            } else {
                                 frame->pict_type = AV_PICTURE_TYPE_NONE;
+                            }
                             applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
                             encodeAndDrain(frame);
 
@@ -939,10 +953,12 @@ void FrameTransformerWorker::run()
                             // request and resetting the datamosh effect at every GOP.
                             // Frame 0 is always left as NONE — it is the mandatory
                             // stream IDR and x264 cannot encode it as P or B.
-                            if (m_globalParams.killIFrames && frameIdx > 0)
+                            if (m_globalParams.killIFrames && frameIdx > 0) {
                                 frame->pict_type = AV_PICTURE_TYPE_P;
-                            else
+                                frame->flags    &= ~AV_FRAME_FLAG_KEY;
+                            } else {
                                 frame->pict_type = AV_PICTURE_TYPE_NONE;
+                            }
                             applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
                             encodeAndDrain(frame);
 
