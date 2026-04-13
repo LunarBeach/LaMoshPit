@@ -9,6 +9,7 @@
 class QLabel;
 class QPushButton;
 class QSlider;
+class QGraphicsOpacityEffect;
 
 class PreviewPlayer : public QWidget {
     Q_OBJECT
@@ -41,11 +42,13 @@ private:
     QLabel *m_statusLabel;
     QLabel *m_timeLabel;
     QPushButton *m_playButton;
+    QPushButton *m_pauseButton;
     QPushButton *m_stopButton;
     QPushButton *m_nextFrameButton;
     QPushButton *m_prevFrameButton;
     QPushButton *m_loopButton;
     QPushButton *m_popOutButton;
+    QGraphicsOpacityEffect *m_loopOpacity;
     QSlider *m_positionSlider;
     
     QString m_currentVideoPath;

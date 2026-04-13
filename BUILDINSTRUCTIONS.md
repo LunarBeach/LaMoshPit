@@ -8,6 +8,14 @@
 - **CMake binary**: `C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`
 - **Build directory**: `<repo root>\build\` (pre-configured, do not re-run CMake configure)
 
+## Re-configure (required after CMakeCache.txt deletion or first clone)
+
+```powershell
+powershell -Command "& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -S 'C:\Users\Thelu\Desktop\CodingProjects\LaMoshPit' -B 'C:\Users\Thelu\Desktop\CodingProjects\LaMoshPit\build' -DCMAKE_TOOLCHAIN_FILE='C:\Users\Thelu\Desktop\CodingProjects\LaMoshPit\vcpkg\scripts\buildsystems\vcpkg.cmake' -DVCPKG_INSTALLED_DIR='C:/Users/Thelu/Desktop/CodingProjects/LaMoshPit/vcpkg/installed' -DVCPKG_TARGET_TRIPLET=x64-windows 2>&1 | Out-File -FilePath 'C:\Users\Thelu\Desktop\CodingProjects\LaMoshPit\build\configure_log.txt' -Encoding UTF8; Write-Host 'exit:' $LASTEXITCODE"
+```
+
+After configure, run a build as normal. You only need to re-configure if you delete `build\CMakeCache.txt` or add new source files to CMakeLists.txt (though source file additions now auto-configure since FindFFMPEG paths are pre-seeded in CMakeLists.txt itself).
+
 ## Running a Build
 
 Always use PowerShell and the full cmake path. `cmake` is not on PATH in any shell.

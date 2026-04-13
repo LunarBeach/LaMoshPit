@@ -1,5 +1,6 @@
 #include "DecodePipeline.h"
 #include <QDebug>
+#include <cmath>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -10,7 +11,8 @@ extern "C" {
 #include <libavutil/display.h>
 }
 
-bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& outputFile)
+bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& outputFile,
+                                      ProgressCallback progress)
 {
     AVFormatContext *ifmt_ctx = nullptr, *ofmt_ctx = nullptr;
     AVCodecContext *dec_ctx = nullptr, *enc_ctx = nullptr;
@@ -58,24 +60,76 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         double input_fps = av_q2d(in_stream->avg_frame_rate);
         qDebug() << "Input video info - FPS:" << input_fps << "Duration:" << ifmt_ctx->duration;
 
+        // Estimate total frame count for progress reporting
+        int estimatedTotal = 0;
+        if (in_stream->nb_frames > 0) {
+            estimatedTotal = (int)in_stream->nb_frames;
+        } else if (ifmt_ctx->duration > 0 && input_fps > 0) {
+            estimatedTotal = (int)(ifmt_ctx->duration / (double)AV_TIME_BASE * input_fps);
+        }
+        int frameCounter = 0;
+
         // Detect display-matrix rotation so portrait videos stay upright.
-        // Use codecpar->coded_side_data (FFmpeg 6.1+ / 7.x API).
+        // Try multiple metadata locations — different containers / muxers
+        // store rotation in different places.
         int rotation = 0;
         {
-            const AVPacketSideData* sd = av_packet_side_data_get(
-                in_stream->codecpar->coded_side_data,
-                in_stream->codecpar->nb_coded_side_data,
-                AV_PKT_DATA_DISPLAYMATRIX);
-            if (sd && sd->size >= (size_t)(9 * sizeof(int32_t))) {
-                double deg = av_display_rotation_get((const int32_t*)sd->data);
-                if (deg == deg) {  // NaN check
-                    int angle = (int)(deg + 0.5);
-                    angle = ((angle % 360) + 360) % 360;
-                    if (angle == 90 || angle == 270)
-                        rotation = angle;
-                    qDebug() << "Detected display matrix rotation:" << angle << "deg (raw:" << deg << ")";
+            bool found = false;
+
+            // Method 1: codecpar->coded_side_data (FFmpeg 6.1+ / 7.x API)
+            {
+                const AVPacketSideData* sd = av_packet_side_data_get(
+                    in_stream->codecpar->coded_side_data,
+                    in_stream->codecpar->nb_coded_side_data,
+                    AV_PKT_DATA_DISPLAYMATRIX);
+                if (sd && sd->size >= (size_t)(9 * sizeof(int32_t))) {
+                    double deg = av_display_rotation_get((const int32_t*)sd->data);
+                    if (deg == deg) {  // NaN check
+                        int angle = (int)round(deg);
+                        angle = ((angle % 360) + 360) % 360;
+                        if (angle == 90 || angle == 180 || angle == 270) {
+                            rotation = angle;
+                            found = true;
+                        }
+                        qDebug() << "Method 1 (coded_side_data) rotation:" << angle << "deg (raw:" << deg << ")";
+                    }
                 }
             }
+
+            // Method 2: stream metadata "rotate" key (common in MP4/MOV from phones)
+            if (!found) {
+                const AVDictionaryEntry* rotEntry = av_dict_get(
+                    in_stream->metadata, "rotate", nullptr, 0);
+                if (rotEntry) {
+                    int angle = atoi(rotEntry->value);
+                    angle = ((angle % 360) + 360) % 360;
+                    if (angle == 90 || angle == 180 || angle == 270) {
+                        rotation = angle;
+                        found = true;
+                    }
+                    qDebug() << "Method 2 (stream metadata 'rotate') rotation:" << angle << "deg";
+                }
+            }
+
+            // Method 3: container-level metadata "rotate" key
+            if (!found && ifmt_ctx->metadata) {
+                const AVDictionaryEntry* rotEntry = av_dict_get(
+                    ifmt_ctx->metadata, "rotate", nullptr, 0);
+                if (rotEntry) {
+                    int angle = atoi(rotEntry->value);
+                    angle = ((angle % 360) + 360) % 360;
+                    if (angle == 90 || angle == 180 || angle == 270) {
+                        rotation = angle;
+                        found = true;
+                    }
+                    qDebug() << "Method 3 (container metadata 'rotate') rotation:" << angle << "deg";
+                }
+            }
+
+            if (rotation != 0)
+                qDebug() << "Final rotation to apply:" << rotation << "deg";
+            else
+                qDebug() << "No rotation metadata found — assuming upright";
         }
 
         // 3. Setup Output Context
@@ -160,7 +214,7 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                         // encoded output has the correct portrait orientation.
                         AVFrame* sendFrame = frame;
                         AVFrame* rotated   = nullptr;
-                        if (rotation == 90 || rotation == 270) {
+                        if (rotation == 90 || rotation == 180 || rotation == 270) {
                             rotated = av_frame_alloc();
                             rotated->format = AV_PIX_FMT_YUV420P;
                             rotated->width  = enc_ctx->width;
@@ -179,6 +233,19 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                                         rotated->data[1][c * rotated->linesize[1] + (srcH/2 - 1 - r)] =
                                             frame->data[1][r * frame->linesize[1] + c];
                                         rotated->data[2][c * rotated->linesize[2] + (srcH/2 - 1 - r)] =
+                                            frame->data[2][r * frame->linesize[2] + c];
+                                    }
+                            } else if (rotation == 180) {
+                                // 180°: src(row,col) → dst(srcH-1-row, srcW-1-col)
+                                for (int r = 0; r < srcH; r++)
+                                    for (int c = 0; c < srcW; c++)
+                                        rotated->data[0][(srcH - 1 - r) * rotated->linesize[0] + (srcW - 1 - c)] =
+                                            frame->data[0][r * frame->linesize[0] + c];
+                                for (int r = 0; r < srcH / 2; r++)
+                                    for (int c = 0; c < srcW / 2; c++) {
+                                        rotated->data[1][(srcH/2 - 1 - r) * rotated->linesize[1] + (srcW/2 - 1 - c)] =
+                                            frame->data[1][r * frame->linesize[1] + c];
+                                        rotated->data[2][(srcH/2 - 1 - r) * rotated->linesize[2] + (srcW/2 - 1 - c)] =
                                             frame->data[2][r * frame->linesize[2] + c];
                                     }
                             } else { // 270° CW = 90° CCW
@@ -211,6 +278,9 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                             av_packet_free(&enc_pkt);
                         }
                         if (rotated) av_frame_free(&rotated);
+                        frameCounter++;
+                        if (progress && estimatedTotal > 0)
+                            progress(frameCounter, estimatedTotal);
                     }
                 }
             }

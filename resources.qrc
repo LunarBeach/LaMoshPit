@@ -2,5 +2,16 @@
   <qresource prefix="/">
     <file>assets/ico/LA_ICO_5.ico</file>
     <file>assets/png/LA_ICO_5.png</file>
+    <file>assets/png/Open_Video_Splash_Background.png</file>
+    <file>assets/png/Load_Progress_Background.png</file>
+    <file>assets/png/Load_Progress_Background_LaMoshPit.png</file>
+    <file>assets/png/Load_Progress_BG_LaMoshPit.png</file>
+    <file>assets/png/LaMoshPit_Launch_Splash.png</file>
+    <file>assets/png/Buttons/Previous_Frame.png</file>
+    <file>assets/png/Buttons/Pause_Button.png</file>
+    <file>assets/png/Buttons/Stop_Button.png</file>
+    <file>assets/png/Buttons/Play_Button.png</file>
+    <file>assets/png/Buttons/Next_Frame.png</file>
+    <file>assets/png/Buttons/Loop_Button.png</file>
   </qresource>
 </RCC>

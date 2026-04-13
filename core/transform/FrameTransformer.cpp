@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QSet>
 #include <cstdlib>   // std::rand()
+#include <cmath>     // sin, cos, round
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -23,6 +24,7 @@ FrameTransformerWorker::FrameTransformerWorker(const QString& videoPath,
                                                const QVector<char>& origFrameTypes,
                                                const MBEditMap&     mbEdits,
                                                const GlobalEncodeParams& globalParams,
+                                               int  interpolateCount,
                                                QObject* parent)
     : QObject(parent)
     , m_videoPath(videoPath)
@@ -32,6 +34,7 @@ FrameTransformerWorker::FrameTransformerWorker(const QString& videoPath,
     , m_origFrameTypes(origFrameTypes)
     , m_mbEdits(mbEdits)
     , m_globalParams(globalParams)
+    , m_interpolateCount(interpolateCount)
 {}
 
 // ── Helper: map analysis type char → AVPictureType ───────────────────────────
@@ -62,6 +65,42 @@ static void applyForceType(AVFrame* frame, FrameTransformerWorker::TargetType ty
         frame->flags    &= ~AV_FRAME_FLAG_KEY;
         break;
     default: break;
+    }
+}
+
+// ── Helper: flip a YUV420P frame in-place ──────────────────────────────────
+// vertical=true  → mirror rows (upside-down)
+// vertical=false → mirror columns (left-right)
+static void flipFrameInPlace(AVFrame* frame, bool vertical)
+{
+    if (!frame || frame->format != AV_PIX_FMT_YUV420P) return;
+    int w = frame->width, h = frame->height;
+
+    if (vertical) {
+        // Swap rows top↔bottom for each plane
+        for (int plane = 0; plane < 3; plane++) {
+            int pH = (plane == 0) ? h : h / 2;
+            int linesize = frame->linesize[plane];
+            int pW = (plane == 0) ? w : w / 2;
+            for (int r = 0; r < pH / 2; r++) {
+                uint8_t* top = frame->data[plane] + r * linesize;
+                uint8_t* bot = frame->data[plane] + (pH - 1 - r) * linesize;
+                for (int c = 0; c < pW; c++)
+                    std::swap(top[c], bot[c]);
+            }
+        }
+    } else {
+        // Swap columns left↔right for each plane
+        for (int plane = 0; plane < 3; plane++) {
+            int pH = (plane == 0) ? h : h / 2;
+            int pW = (plane == 0) ? w : w / 2;
+            int linesize = frame->linesize[plane];
+            for (int r = 0; r < pH; r++) {
+                uint8_t* row = frame->data[plane] + r * linesize;
+                for (int c = 0; c < pW / 2; c++)
+                    std::swap(row[c], row[pW - 1 - c]);
+            }
+        }
     }
 }
 
@@ -459,6 +498,366 @@ static void applyColorTwist(AVFrame* frame,
     }
 }
 
+// ── Posterize: reduce colour depth per MB ────────────────────────────────────
+static void applyPosterize(AVFrame* frame, const QSet<int>& mbs,
+                            int bits, int mbCols)
+{
+    if (bits >= 8 || bits < 1) return; // 8 = no effect
+    if (av_frame_make_writable(frame) < 0) return;
+    const int shift = 8 - bits;
+    const int mask  = 0xFF << shift;
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol * 16, y0 = mbRow * 16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x)
+                frame->data[0][(y0+y)*frame->linesize[0] + (x0+x)] &= mask;
+        // Chroma planes (8x8)
+        int cx0 = mbCol * 8, cy0 = mbRow * 8;
+        for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+            for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                frame->data[1][(cy0+y)*frame->linesize[1] + (cx0+x)] &= mask;
+                frame->data[2][(cy0+y)*frame->linesize[2] + (cx0+x)] &= mask;
+            }
+    }
+}
+
+// ── Pixel Shuffle: randomly permute pixel positions within each MB ───────────
+static void applyPixelShuffle(AVFrame* frame, const QSet<int>& mbs,
+                               int radius, int mbCols)
+{
+    if (radius <= 0) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol * 16, y0 = mbRow * 16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int dx = (std::rand() % (2*radius+1)) - radius;
+                int dy = (std::rand() % (2*radius+1)) - radius;
+                int sx = qBound(0, x0+x+dx, frame->width-1);
+                int sy = qBound(0, y0+y+dy, frame->height-1);
+                std::swap(frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)],
+                          frame->data[0][sy*frame->linesize[0]+sx]);
+            }
+    }
+}
+
+// ── Sharpen / Blur: per-MB convolution ───────────────────────────────────────
+static void applySharpen(AVFrame* frame, const QSet<int>& mbs,
+                          int strength, int mbCols)
+{
+    if (strength == 0) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    // Work on Y plane. strength > 0 = sharpen, < 0 = blur.
+    const float alpha = qBound(-1.0f, strength / 100.0f, 1.0f);
+    const int W = frame->width, H = frame->height;
+    // Temp buffer for one MB row of luma
+    uint8_t tmp[16*16];
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        int bw = qMin(16, W-x0), bh = qMin(16, H-y0);
+        // Copy original MB luma
+        for (int y = 0; y < bh; ++y)
+            for (int x = 0; x < bw; ++x)
+                tmp[y*16+x] = frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)];
+        // Apply unsharp mask: out = orig + alpha * (orig - blur)
+        for (int y = 0; y < bh; ++y)
+            for (int x = 0; x < bw; ++x) {
+                // 3x3 box blur (clamped to frame bounds)
+                int sum = 0, cnt = 0;
+                for (int ky = -1; ky <= 1; ++ky)
+                    for (int kx = -1; kx <= 1; ++kx) {
+                        int sy = y0+y+ky, sx = x0+x+kx;
+                        if (sy >= 0 && sy < H && sx >= 0 && sx < W) {
+                            sum += frame->data[0][sy*frame->linesize[0]+sx];
+                            cnt++;
+                        }
+                    }
+                int blur = sum / cnt;
+                int orig = tmp[y*16+x];
+                int val = orig + (int)(alpha * (float)(orig - blur));
+                frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] =
+                    (uint8_t)qBound(0, val, 255);
+            }
+    }
+}
+
+// ── Temporal Difference Amplify ──────────────────────────────────────────────
+static void applyTempDiffAmp(AVFrame* frame, const QSet<int>& mbs,
+                              int amplify, int mbCols, const AVFrame* ref)
+{
+    if (!ref || amplify <= 0) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    const float gain = amplify / 100.0f; // 100 = 1× extra, 200 = 2× extra
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int pos = (y0+y)*frame->linesize[0]+(x0+x);
+                int cur = frame->data[0][pos];
+                int rp  = (y0+y < ref->height && x0+x < ref->width)
+                          ? ref->data[0][(y0+y)*ref->linesize[0]+(x0+x)] : cur;
+                int diff = cur - rp;
+                int val = cur + (int)(gain * diff);
+                frame->data[0][pos] = (uint8_t)qBound(0, val, 255);
+            }
+        // UV planes
+        int cx0 = mbCol*8, cy0 = mbRow*8;
+        for (int pl = 1; pl <= 2; ++pl)
+            for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+                for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                    int pos = (cy0+y)*frame->linesize[pl]+(cx0+x);
+                    int cur = frame->data[pl][pos];
+                    int rp  = (cy0+y < ref->height/2 && cx0+x < ref->width/2)
+                              ? ref->data[pl][(cy0+y)*ref->linesize[pl]+(cx0+x)] : cur;
+                    int diff = cur - rp;
+                    int val = cur + (int)(gain * diff);
+                    frame->data[pl][pos] = (uint8_t)qBound(0, val, 255);
+                }
+    }
+}
+
+// ── Hue Rotate: continuous UV-plane rotation ─────────────────────────────────
+static void applyHueRotate(AVFrame* frame, const QSet<int>& mbs,
+                            int degrees, int mbCols)
+{
+    if (degrees <= 0 || degrees >= 360) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    const float rad = degrees * 3.14159265f / 180.0f;
+    const float cosA = cosf(rad), sinA = sinf(rad);
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int cx0 = mbCol*8, cy0 = mbRow*8;
+        for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+            for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                int posU = (cy0+y)*frame->linesize[1]+(cx0+x);
+                int posV = (cy0+y)*frame->linesize[2]+(cx0+x);
+                float u = (float)frame->data[1][posU] - 128.0f;
+                float v = (float)frame->data[2][posV] - 128.0f;
+                float ru = u * cosA - v * sinA;
+                float rv = u * sinA + v * cosA;
+                frame->data[1][posU] = (uint8_t)qBound(0, (int)(ru + 128.5f), 255);
+                frame->data[2][posV] = (uint8_t)qBound(0, (int)(rv + 128.5f), 255);
+            }
+    }
+}
+
+// ── Bitstream Surgery — pixel-domain approximations ──────────────────────────
+// These approximate bitstream-level effects by manipulating pixels so the
+// encoder produces the desired compressed-domain result.
+
+// Force Skip: copy reference pixels exactly → encoder emits skip MB
+static void applyForceSkip(AVFrame* frame, const QSet<int>& mbs,
+                            int pct, int mbCols, const AVFrame* ref)
+{
+    if (!ref || pct <= 0) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    for (int mbIdx : mbs) {
+        if (pct < 100 && (std::rand() % 100) >= pct) continue;
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int pos = (y0+y)*frame->linesize[0]+(x0+x);
+                if (y0+y < ref->height && x0+x < ref->width)
+                    frame->data[0][pos] = ref->data[0][(y0+y)*ref->linesize[0]+(x0+x)];
+            }
+        int cx0 = mbCol*8, cy0 = mbRow*8;
+        for (int pl = 1; pl <= 2; ++pl)
+            for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+                for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                    int pos = (cy0+y)*frame->linesize[pl]+(cx0+x);
+                    if (cy0+y < ref->height/2 && cx0+x < ref->width/2)
+                        frame->data[pl][pos] = ref->data[pl][(cy0+y)*ref->linesize[pl]+(cx0+x)];
+                }
+    }
+}
+
+// Direct MVD injection: shift reference pixels by exact (mvdX, mvdY)
+// Similar to mvDrift but applied as a separate bitstream-surgery knob.
+static void applyBsMvd(AVFrame* frame, const QSet<int>& mbs,
+                        int mvdX, int mvdY, int mbCols, const AVFrame* ref)
+{
+    if (!ref || (mvdX == 0 && mvdY == 0)) return;
+    if (av_frame_make_writable(frame) < 0) return;
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int sx = qBound(0, x0+x+mvdX, ref->width-1);
+                int sy = qBound(0, y0+y+mvdY, ref->height-1);
+                frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] =
+                    ref->data[0][sy*ref->linesize[0]+sx];
+            }
+        int cx0 = mbCol*8, cy0 = mbRow*8;
+        int cmx = mvdX/2, cmy = mvdY/2;
+        for (int pl = 1; pl <= 2; ++pl)
+            for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+                for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                    int sx = qBound(0, cx0+x+cmx, ref->width/2-1);
+                    int sy = qBound(0, cy0+y+cmy, ref->height/2-1);
+                    frame->data[pl][(cy0+y)*frame->linesize[pl]+(cx0+x)] =
+                        ref->data[pl][sy*ref->linesize[pl]+sx];
+                }
+    }
+}
+
+// Intra Mode: structure pixels to favour a specific intra prediction pattern
+static void applyBsIntraMode(AVFrame* frame, const QSet<int>& mbs,
+                              int mode, int mbCols)
+{
+    if (mode < 0) return; // -1 = default, do nothing
+    if (av_frame_make_writable(frame) < 0) return;
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        // Get the MB's average luma as a base value
+        int sum = 0, cnt = 0;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                sum += frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)]; cnt++;
+            }
+        int avg = cnt > 0 ? sum/cnt : 128;
+        // Apply prediction-favouring pixel patterns
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int val = avg;
+                switch (mode) {
+                case 0: val = avg + (y - 8) * 4; break; // Vertical gradient
+                case 1: val = avg + (x - 8) * 4; break; // Horizontal gradient
+                case 2: val = avg;                break; // DC (flat)
+                case 3: val = avg + (x+y-16) * 3; break; // Plane (diagonal gradient)
+                }
+                frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] =
+                    (uint8_t)qBound(0, val, 255);
+            }
+    }
+}
+
+// MB Type: restructure pixels to favour specific partition decisions
+static void applyBsMbType(AVFrame* frame, const QSet<int>& mbs,
+                           int mbType, int mbCols, const AVFrame* ref)
+{
+    if (mbType < 0) return; // -1 = default
+    if (av_frame_make_writable(frame) < 0) return;
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        switch (mbType) {
+        case 0: // Skip — copy from reference exactly
+            if (ref) {
+                for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+                    for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                        if (y0+y < ref->height && x0+x < ref->width)
+                            frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] =
+                                ref->data[0][(y0+y)*ref->linesize[0]+(x0+x)];
+                    }
+            }
+            break;
+        case 1: // I16x16 — flatten to single average (forces intra 16x16)
+        {
+            int sum=0, cnt=0;
+            for (int y=0; y<16 && y0+y<frame->height; ++y)
+                for (int x=0; x<16 && x0+x<frame->width; ++x) {
+                    sum += frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)]; cnt++;
+                }
+            uint8_t avg = cnt > 0 ? (uint8_t)(sum/cnt) : 128;
+            for (int y=0; y<16 && y0+y<frame->height; ++y)
+                for (int x=0; x<16 && x0+x<frame->width; ++x)
+                    frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] = avg;
+            break;
+        }
+        case 2: // I4x4 — add per-4x4 block noise to force small partitions
+            for (int by=0; by<4; ++by)
+                for (int bx=0; bx<4; ++bx) {
+                    int off = (std::rand() % 40) - 20;
+                    for (int y=0; y<4 && y0+by*4+y<frame->height; ++y)
+                        for (int x=0; x<4 && x0+bx*4+x<frame->width; ++x) {
+                            int pos = (y0+by*4+y)*frame->linesize[0]+(x0+bx*4+x);
+                            frame->data[0][pos] = (uint8_t)qBound(0, (int)frame->data[0][pos]+off, 255);
+                        }
+                }
+            break;
+        case 3: // P16x16 — slight uniform shift to force single MV
+            if (ref) {
+                for (int y=0; y<16 && y0+y<frame->height; ++y)
+                    for (int x=0; x<16 && x0+x<frame->width; ++x) {
+                        int sx = qBound(0, x0+x+2, ref->width-1);
+                        if (y0+y < ref->height)
+                            frame->data[0][(y0+y)*frame->linesize[0]+(x0+x)] =
+                                ref->data[0][(y0+y)*ref->linesize[0]+sx];
+                    }
+            }
+            break;
+        case 4: // P8x8 — different shifts per 8x8 sub-block
+            if (ref) {
+                for (int by=0; by<2; ++by)
+                    for (int bx=0; bx<2; ++bx) {
+                        int dx = (std::rand() % 8) - 4;
+                        int dy = (std::rand() % 8) - 4;
+                        for (int y=0; y<8 && y0+by*8+y<frame->height; ++y)
+                            for (int x=0; x<8 && x0+bx*8+x<frame->width; ++x) {
+                                int sx = qBound(0, x0+bx*8+x+dx, ref->width-1);
+                                int sy = qBound(0, y0+by*8+y+dy, ref->height-1);
+                                frame->data[0][(y0+by*8+y)*frame->linesize[0]+(x0+bx*8+x)] =
+                                    ref->data[0][sy*ref->linesize[0]+sx];
+                            }
+                    }
+            }
+            break;
+        }
+    }
+}
+
+// DCT Scale: scale residual by transforming to frequency domain and back
+static void applyDctScale(AVFrame* frame, const QSet<int>& mbs,
+                           int scalePct, int mbCols, const AVFrame* ref)
+{
+    if (scalePct == 100 || !ref) return; // 100% = no change
+    if (av_frame_make_writable(frame) < 0) return;
+    const float scale = scalePct / 100.0f;
+    // Approximate: residual = current - reference, scale it, add back to reference
+    for (int mbIdx : mbs) {
+        int mbRow = mbIdx / mbCols, mbCol = mbIdx % mbCols;
+        int x0 = mbCol*16, y0 = mbRow*16;
+        for (int y = 0; y < 16 && y0+y < frame->height; ++y)
+            for (int x = 0; x < 16 && x0+x < frame->width; ++x) {
+                int pos = (y0+y)*frame->linesize[0]+(x0+x);
+                int cur = frame->data[0][pos];
+                int rp  = (y0+y < ref->height && x0+x < ref->width)
+                          ? ref->data[0][(y0+y)*ref->linesize[0]+(x0+x)] : cur;
+                int residual = cur - rp;
+                int val = rp + (int)(scale * residual);
+                frame->data[0][pos] = (uint8_t)qBound(0, val, 255);
+            }
+        int cx0 = mbCol*8, cy0 = mbRow*8;
+        for (int pl = 1; pl <= 2; ++pl)
+            for (int y = 0; y < 8 && cy0+y < frame->height/2; ++y)
+                for (int x = 0; x < 8 && cx0+x < frame->width/2; ++x) {
+                    int pos = (cy0+y)*frame->linesize[pl]+(cx0+x);
+                    int cur = frame->data[pl][pos];
+                    int rp  = (cy0+y < ref->height/2 && cx0+x < ref->width/2)
+                              ? ref->data[pl][(cy0+y)*ref->linesize[pl]+(cx0+x)] : cur;
+                    int residual = cur - rp;
+                    int val = rp + (int)(scale * residual);
+                    frame->data[pl][pos] = (uint8_t)qBound(0, val, 255);
+                }
+    }
+}
+
+// CBP Zero: zero out residual → pixel becomes pure prediction
+static void applyCbpZero(AVFrame* frame, const QSet<int>& mbs,
+                          int pct, int mbCols, const AVFrame* ref)
+{
+    if (!ref || pct <= 0) return;
+    // Same as ForceSkip but specifically targets residual elimination
+    applyForceSkip(frame, mbs, pct, mbCols, ref);
+}
+
 // Applies all MB edits for the given frame index in-place.
 // Must be called just before encodeAndDrain.
 static void applyMBEdits(AVFrame* frame, int frameIdx,
@@ -542,6 +941,92 @@ static void applyMBEdits(AVFrame* frame, int frameIdx,
     // 8. Color twist — separate U/V DC offsets (independent hue steering)
     if (p.colorTwistU != 0 || p.colorTwistV != 0)
         applyColorTwist(frame, mbs, p.colorTwistU, p.colorTwistV, mbCols);
+
+    // 9. Posterize — reduce colour depth
+    if (p.posterize < 8)
+        applyPosterize(frame, mbs, p.posterize, mbCols);
+
+    // 10. Pixel Shuffle — random pixel displacement within MBs
+    if (p.pixelShuffle > 0)
+        applyPixelShuffle(frame, mbs, p.pixelShuffle, mbCols);
+
+    // 11. Sharpen / Blur — per-MB convolution
+    if (p.sharpen != 0)
+        applySharpen(frame, mbs, p.sharpen, mbCols);
+
+    // 12. Temporal Difference Amplify — exaggerate motion delta
+    if (ref && p.tempDiffAmp > 0)
+        applyTempDiffAmp(frame, mbs, p.tempDiffAmp, mbCols, ref);
+
+    // 13. Hue Rotate — continuous UV rotation
+    if (p.hueRotate > 0 && p.hueRotate < 360)
+        applyHueRotate(frame, mbs, p.hueRotate, mbCols);
+
+    // ── Bitstream-domain approximations ──────────────────────────────────────
+
+    // 14. Direct MVD injection
+    if (ref && (p.bsMvdX != 0 || p.bsMvdY != 0))
+        applyBsMvd(frame, mbs, p.bsMvdX, p.bsMvdY, mbCols, ref);
+
+    // 15. Force Skip — copy reference exactly
+    if (ref && p.bsForceSkip > 0)
+        applyForceSkip(frame, mbs, p.bsForceSkip, mbCols, ref);
+
+    // 16. Intra prediction mode structuring
+    if (p.bsIntraMode >= 0)
+        applyBsIntraMode(frame, mbs, p.bsIntraMode, mbCols);
+
+    // 17. MB Type forcing
+    if (p.bsMbType >= 0)
+        applyBsMbType(frame, mbs, p.bsMbType, mbCols, ref);
+
+    // 18. DCT coefficient scaling
+    if (ref && p.bsDctScale != 100)
+        applyDctScale(frame, mbs, p.bsDctScale, mbCols, ref);
+
+    // 19. CBP Zero — drop residual
+    if (ref && p.bsCbpZero > 0)
+        applyCbpZero(frame, mbs, p.bsCbpZero, mbCols, ref);
+}
+
+// ── Frame blending helper (for Interpolate Left / Right) ─────────────────────
+// Allocates a new AVFrame whose pixels are a weighted mix of 'a' and 'b':
+//   pixel = round( a*(1-alpha) + b*alpha )
+// alpha = 0.0 → identical to 'a';  alpha = 1.0 → identical to 'b'.
+// Both frames are assumed to be YUV 4:2:0 planar.  Returns nullptr on failure.
+static AVFrame* blendFramesWeighted(const AVFrame* a, const AVFrame* b, float alpha)
+{
+    if (!a || !b) return nullptr;
+    AVFrame* out = av_frame_alloc();
+    if (!out) return nullptr;
+
+    out->format = AV_PIX_FMT_YUV420P;
+    out->width  = a->width;
+    out->height = a->height;
+    if (av_frame_get_buffer(out, 0) < 0) {
+        av_frame_free(&out);
+        return nullptr;
+    }
+    av_frame_copy_props(out, a);
+    out->pict_type = AV_PICTURE_TYPE_P;
+    out->flags    &= ~AV_FRAME_FLAG_KEY;
+
+    const float wa = 1.0f - alpha;   // weight for frame a
+    const float wb =        alpha;   // weight for frame b
+
+    // Blend Y (full resolution) then U and V (half resolution each axis).
+    for (int plane = 0; plane < 3; ++plane) {
+        const int w = (plane == 0) ? a->width  : (a->width  + 1) / 2;
+        const int h = (plane == 0) ? a->height : (a->height + 1) / 2;
+        for (int y = 0; y < h; ++y) {
+            const uint8_t* pa = a->data[plane] + y * a->linesize[plane];
+            const uint8_t* pb = b->data[plane] + y * b->linesize[plane];
+            uint8_t*       po = out->data[plane] + y * out->linesize[plane];
+            for (int x = 0; x < w; ++x)
+                po[x] = (uint8_t)(wa * (float)pa[x] + wb * (float)pb[x] + 0.5f);
+        }
+    }
+    return out;
 }
 
 // ── Bitstream splice for Delete ────────────────────────────────────────────
@@ -693,12 +1178,249 @@ splice_cleanup:
     emit done(ok, errorMsg);
 }
 
+// ── Reorder frames ────────────────────────────────────────────────────────
+// Decodes all frames into RAM, re-encodes them in the requested display order.
+// m_frameIndices must be [sourceIdx, insertBeforeIdx].
+// "insertBeforeIdx" is in original (pre-move) coordinates: the moved frame is
+// placed just before the frame that currently has that index.
+void FrameTransformerWorker::runReorderFrames()
+{
+    ControlLogger::instance().logApplyStarted(m_totalFrames, 0);
+
+    if (m_frameIndices.size() < 2) {
+        emit done(false, "ReorderFrames: frameIndices must be [source, insertBefore]");
+        return;
+    }
+    const int srcIdx    = m_frameIndices[0];
+    const int insertBef = m_frameIndices[1];
+
+    // No-op: dropping at the same position or immediately after is a no-op.
+    if (insertBef == srcIdx || insertBef == srcIdx + 1) {
+        ControlLogger::instance().logApplyCompleted(true);
+        emit done(true, "");
+        return;
+    }
+
+    const QString tempPath = m_videoPath + ".xform_tmp.mp4";
+    QString errorMsg;
+    bool    ok = false;
+
+    AVFormatContext* ifmt   = nullptr;
+    AVCodecContext*  decCtx = nullptr;
+    AVFormatContext* ofmt   = nullptr;
+    AVCodecContext*  encCtx = nullptr;
+    AVPacket* rpkt  = nullptr;
+    AVPacket* wpkt  = nullptr;
+    AVFrame*  frame = nullptr;
+    int vsIdx = -1;
+    QVector<AVFrame*> allFrames;
+
+    // ── Open input + decoder ───────────────────────────────────────────────
+    if (avformat_open_input(&ifmt, m_videoPath.toUtf8().constData(),
+                            nullptr, nullptr) < 0) {
+        errorMsg = "Cannot open input: " + m_videoPath; goto reorder_cleanup;
+    }
+    if (avformat_find_stream_info(ifmt, nullptr) < 0) {
+        errorMsg = "avformat_find_stream_info failed"; goto reorder_cleanup;
+    }
+    for (unsigned i = 0; i < ifmt->nb_streams; i++) {
+        if (ifmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            vsIdx = (int)i; break;
+        }
+    }
+    if (vsIdx < 0) { errorMsg = "No video stream"; goto reorder_cleanup; }
+
+    {
+        AVStream* inS = ifmt->streams[vsIdx];
+        const AVCodec* dec = avcodec_find_decoder(inS->codecpar->codec_id);
+        if (!dec) { errorMsg = "No decoder"; goto reorder_cleanup; }
+        decCtx = avcodec_alloc_context3(dec);
+        if (avcodec_parameters_to_context(decCtx, inS->codecpar) < 0) goto reorder_cleanup;
+        if (avcodec_open2(decCtx, dec, nullptr) < 0) {
+            errorMsg = "Cannot open decoder"; goto reorder_cleanup;
+        }
+    }
+
+    // ── Decode all frames into a RAM buffer ────────────────────────────────
+    frame = av_frame_alloc();
+    rpkt  = av_packet_alloc();
+    {
+        while (av_read_frame(ifmt, rpkt) >= 0) {
+            if (rpkt->stream_index == vsIdx) {
+                if (avcodec_send_packet(decCtx, rpkt) == 0) {
+                    while (avcodec_receive_frame(decCtx, frame) == 0) {
+                        AVFrame* stored = av_frame_clone(frame);
+                        stored->pict_type = AV_PICTURE_TYPE_NONE;
+                        allFrames.append(stored);
+                        av_frame_unref(frame);
+                    }
+                }
+            }
+            av_packet_unref(rpkt);
+        }
+        avcodec_send_packet(decCtx, nullptr);   // flush
+        while (avcodec_receive_frame(decCtx, frame) == 0) {
+            AVFrame* stored = av_frame_clone(frame);
+            stored->pict_type = AV_PICTURE_TYPE_NONE;
+            allFrames.append(stored);
+            av_frame_unref(frame);
+        }
+    }
+
+    if (allFrames.isEmpty()) {
+        errorMsg = "No frames decoded"; goto reorder_cleanup;
+    }
+
+    // ── Build new display order ────────────────────────────────────────────
+    // For each original index i (0..N-1):
+    //   • if i == insertBef  → emit srcIdx first, then i (if i != srcIdx)
+    //   • else if i == srcIdx → skip (it was already emitted above)
+    //   • else                → emit i
+    // If insertBef >= N, srcIdx is appended at the end.
+    {
+        const int N = allFrames.size();
+        QVector<int> newOrder;
+        newOrder.reserve(N);
+        for (int i = 0; i < N; i++) {
+            if (i == insertBef) newOrder.append(srcIdx);
+            if (i != srcIdx)    newOrder.append(i);
+        }
+        if (insertBef >= N) newOrder.append(srcIdx);
+
+        // ── Open encoder + output ──────────────────────────────────────────
+        {
+            AVStream* inS = ifmt->streams[vsIdx];
+
+            if (avformat_alloc_output_context2(&ofmt, nullptr, nullptr,
+                                               tempPath.toUtf8().constData()) < 0) {
+                errorMsg = "Cannot alloc output context"; goto reorder_cleanup;
+            }
+            const AVCodec* enc = avcodec_find_encoder(AV_CODEC_ID_H264);
+            if (!enc) { errorMsg = "H.264 encoder not found"; goto reorder_cleanup; }
+
+            encCtx = avcodec_alloc_context3(enc);
+            encCtx->width               = decCtx->width;
+            encCtx->height              = decCtx->height;
+            encCtx->pix_fmt             = AV_PIX_FMT_YUV420P;
+            encCtx->sample_aspect_ratio = decCtx->sample_aspect_ratio;
+            encCtx->framerate           = inS->avg_frame_rate;
+            encCtx->time_base           = inS->time_base;
+            if (encCtx->framerate.num <= 0 || encCtx->framerate.den <= 0) {
+                encCtx->framerate = AVRational{24, 1};
+                encCtx->time_base = AVRational{1, 24};
+            }
+            encCtx->bit_rate     = 0;
+            encCtx->max_b_frames = 0;   // no B-frames keeps encode order == display order
+            encCtx->gop_size     = 250;
+            av_opt_set(encCtx->priv_data, "crf", "18", 0);
+            av_opt_set(encCtx->priv_data, "x264-params",
+                       "keyint=250:min-keyint=250:scenecut=0:bframes=0:b-adapt=0", 0);
+
+            if (ofmt->oformat->flags & AVFMT_GLOBALHEADER)
+                encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+            if (avcodec_open2(encCtx, enc, nullptr) < 0) {
+                errorMsg = "Cannot open encoder"; goto reorder_cleanup;
+            }
+
+            AVStream* outS = avformat_new_stream(ofmt, nullptr);
+            avcodec_parameters_from_context(outS->codecpar, encCtx);
+            outS->time_base      = encCtx->time_base;
+            outS->avg_frame_rate = encCtx->framerate;
+
+            if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
+                if (avio_open(&ofmt->pb, tempPath.toUtf8().constData(),
+                              AVIO_FLAG_WRITE) < 0) {
+                    errorMsg = "Cannot open output file"; goto reorder_cleanup;
+                }
+            }
+            if (avformat_write_header(ofmt, nullptr) < 0) {
+                errorMsg = "avformat_write_header failed"; goto reorder_cleanup;
+            }
+        }
+
+        // ── Encode in new order ────────────────────────────────────────────
+        wpkt = av_packet_alloc();
+        {
+            int64_t outFrameCount = 0;
+            int64_t frameDuration = 1;
+            if (encCtx->framerate.num > 0 && encCtx->framerate.den > 0) {
+                frameDuration = av_rescale_q(
+                    1, AVRational{encCtx->framerate.den, encCtx->framerate.num},
+                    encCtx->time_base);
+                if (frameDuration <= 0) frameDuration = 1;
+            }
+            AVStream* outS = ofmt->streams[0];
+
+            for (int i = 0; i < newOrder.size(); i++) {
+                AVFrame* f = allFrames[newOrder[i]];
+                f->pts = outFrameCount * frameDuration;
+                outFrameCount++;
+                if (avcodec_send_frame(encCtx, f) == 0) {
+                    while (avcodec_receive_packet(encCtx, wpkt) == 0) {
+                        wpkt->stream_index = 0;
+                        av_packet_rescale_ts(wpkt, encCtx->time_base, outS->time_base);
+                        av_interleaved_write_frame(ofmt, wpkt);
+                        av_packet_unref(wpkt);
+                    }
+                }
+                emit progress(i + 1, N);
+            }
+
+            // Flush encoder
+            avcodec_send_frame(encCtx, nullptr);
+            while (avcodec_receive_packet(encCtx, wpkt) == 0) {
+                wpkt->stream_index = 0;
+                av_packet_rescale_ts(wpkt, encCtx->time_base, outS->time_base);
+                av_interleaved_write_frame(ofmt, wpkt);
+                av_packet_unref(wpkt);
+            }
+        }
+        av_write_trailer(ofmt);
+        ok = true;
+    }
+
+reorder_cleanup:
+    for (AVFrame* f : allFrames) av_frame_free(&f);
+    if (wpkt)   av_packet_free(&wpkt);
+    if (rpkt)   av_packet_free(&rpkt);
+    if (frame)  av_frame_free(&frame);
+    if (decCtx) avcodec_free_context(&decCtx);
+    if (encCtx) avcodec_free_context(&encCtx);
+    if (ofmt && !(ofmt->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&ofmt->pb);
+    if (ofmt)   avformat_free_context(ofmt);
+    if (ifmt)   avformat_close_input(&ifmt);
+
+    if (ok) {
+        if (!QFile::remove(m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot remove original file for replacement";
+            QFile::remove(tempPath);
+        } else if (!QFile::rename(tempPath, m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot rename temp file to original path";
+        }
+    } else {
+        QFile::remove(tempPath);
+    }
+
+    ControlLogger::instance().logApplyCompleted(ok);
+    emit done(ok, errorMsg);
+}
+
 // ── Main re-encode work ────────────────────────────────────────────────────
 void FrameTransformerWorker::run()
 {
     // Delete is handled by bitstream splice — no decode/re-encode required.
     if (m_targetType == DeleteFrames) {
         runBitstreamSplice();
+        return;
+    }
+
+    // Reorder decodes all frames into memory then re-encodes in the new order.
+    if (m_targetType == ReorderFrames) {
+        runReorderFrames();
         return;
     }
 
@@ -834,7 +1556,9 @@ void FrameTransformerWorker::run()
         // insert keyframes early (on scene transitions etc.) even with scenecut=0.
         // For datamoshing this silently resets the smear wherever x264 decides
         // to place an early keyframe.
-        x264p += QString("keyint=%1:min-keyint=%1:scenecut=0:").arg(gopSize);
+        x264p += QString("keyint=%1:min-keyint=%1:scenecut=%2:")
+                     .arg(gopSize)
+                     .arg(m_globalParams.scenecut ? 40 : 0);
         {
             // When killing I-frames: force bframes=0, b-adapt=0.
             // x264's B-frame lookahead (b-adapt=2) inserts I-frames to anchor
@@ -898,6 +1622,19 @@ void FrameTransformerWorker::run()
         if (m_globalParams.mbTreeDisable) x264p += "no-mbtree=1:";
         if (m_globalParams.rcLookahead >= 0)
             x264p += QString("rc-lookahead=%1:").arg(m_globalParams.rcLookahead);
+        // Rate-control fidelity (only emitted when user explicitly enables)
+        if (m_globalParams.qcompEnabled)
+            x264p += QString("qcomp=%1:").arg(m_globalParams.qcomp, 0, 'f', 2);
+        if (m_globalParams.ipratioEnabled)
+            x264p += QString("ipratio=%1:").arg(m_globalParams.ipratio, 0, 'f', 2);
+        if (m_globalParams.pbratioEnabled)
+            x264p += QString("pbratio=%1:").arg(m_globalParams.pbratio, 0, 'f', 2);
+        if (m_globalParams.deadzoneInterEnabled)
+            x264p += QString("deadzone-inter=%1:").arg(m_globalParams.deadzoneInter);
+        if (m_globalParams.deadzoneIntraEnabled)
+            x264p += QString("deadzone-intra=%1:").arg(m_globalParams.deadzoneIntra);
+        if (m_globalParams.qblurEnabled)
+            x264p += QString("qblur=%1:").arg(m_globalParams.qblur, 0, 'f', 2);
 
         // Strip trailing colon
         while (x264p.endsWith(':')) x264p.chop(1);
@@ -1003,6 +1740,16 @@ void FrameTransformerWorker::run()
             }
         }
 
+        // Pre-compute selection bounds for InterpolateLeft / InterpolateRight.
+        // minSel = earliest selected frame; maxSel = rightmost selected frame.
+        int minSel = -1, maxSel = -1;
+        if (m_targetType == InterpolateLeft || m_targetType == InterpolateRight) {
+            for (int idx : m_frameIndices) {
+                if (minSel < 0 || idx < minSel) minSel = idx;
+                if (maxSel < 0 || idx > maxSel) maxSel = idx;
+            }
+        }
+
         int frameIdx = 0;
         AVStream* outStream = ofmt->streams[0];
 
@@ -1100,7 +1847,14 @@ void FrameTransformerWorker::run()
                             applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
                             encodeAndDrain(frame);
 
-                        } else {
+                        } else if (m_targetType == FlipVertical || m_targetType == FlipHorizontal) {
+                            // ── Flip / Flop ──────────────────────────────
+                            if (inSel)
+                                flipFrameInPlace(frame, m_targetType == FlipVertical);
+                            frame->pict_type = AV_PICTURE_TYPE_NONE;
+                            encodeAndDrain(frame);
+
+                        } else if (m_targetType == DuplicateLeft || m_targetType == DuplicateRight) {
                             // ── Duplicate Left / Right ───────────────────
                             // Apply MB edits BEFORE cloning so the duplicate
                             // inherits both the pixel modifications and ROI
@@ -1123,6 +1877,46 @@ void FrameTransformerWorker::run()
                             } else {
                                 encodeAndDrain(frame);
                             }
+
+                        } else {
+                            // ── Interpolate Left / Right ──────────────────
+                            // All frames pass through unmodified.  At the
+                            // trigger point m_interpolateCount new frames are
+                            // inserted, each a linearly-weighted blend stepping
+                            // from 'a' toward 'b' in equal increments:
+                            //   InterpolateLeft:  trigger = frameIdx == minSel
+                            //     a = refBuf[0] (left neighbour)
+                            //     b = current frame (minSel)
+                            //   InterpolateRight: trigger = frameIdx == maxSel+1
+                            //     a = refBuf[0] (rightmost selected frame)
+                            //     b = current frame (maxSel+1)
+                            //
+                            // For N inserted frames the alphas are:
+                            //   k/(N+1)  for k = 1 … N
+                            // so the sequence becomes:
+                            //   [..., a, interp_1, interp_2, …, interp_N, b, ...]
+                            frame->pict_type = AV_PICTURE_TYPE_NONE;
+
+                            bool doBlend = false;
+                            if (m_targetType == InterpolateLeft &&
+                                frameIdx == minSel && frameIdx > 0 && refBuf[0])
+                                doBlend = true;
+                            else if (m_targetType == InterpolateRight &&
+                                     maxSel >= 0 && frameIdx == maxSel + 1 && refBuf[0])
+                                doBlend = true;
+
+                            if (doBlend) {
+                                const int N = qMax(1, m_interpolateCount);
+                                for (int k = 1; k <= N; ++k) {
+                                    const float alpha = (float)k / (float)(N + 1);
+                                    AVFrame* blend = blendFramesWeighted(refBuf[0], frame, alpha);
+                                    if (blend) {
+                                        encodeAndDrain(blend);
+                                        av_frame_free(&blend);
+                                    }
+                                }
+                            }
+                            encodeAndDrain(frame);
                         }
 
                         // ── Shift ring buffer — store POST-EDIT frame ────────

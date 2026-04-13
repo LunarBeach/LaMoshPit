@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QTime>
 #include <QUrl>
+#include <QGraphicsOpacityEffect>
 
 // Qt6 Multimedia includes
 #include <QMediaPlayer>
@@ -43,71 +44,110 @@ PreviewPlayer::PreviewPlayer(QWidget *parent)
 void PreviewPlayer::setupUI()
 {
     auto *mainLayout = new QVBoxLayout(this);
-    
+    mainLayout->setContentsMargins(4, 4, 4, 4);
+    mainLayout->setSpacing(4);
+
     // Set up video widget
     m_videoWidget->setMinimumSize(640, 360);
     m_videoWidget->setStyleSheet("background-color: black; border: 2px solid #ff00ff;");
-    
+
     // Status label
     m_statusLabel = new QLabel("Video player ready", this);
     m_statusLabel->setAlignment(Qt::AlignCenter);
     m_statusLabel->setStyleSheet("font-size: 14px; color: #ff00ff;");
-    
+
     // Time label
     m_timeLabel = new QLabel("00:00 / 00:00", this);
     m_timeLabel->setAlignment(Qt::AlignCenter);
-    m_timeLabel->setStyleSheet("font-family: monospace;");
-    
-    // Buttons
-    m_playButton = new QPushButton(this);
-    m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_playButton->setEnabled(false);
-    
-    m_stopButton = new QPushButton("Stop", this);
-    m_stopButton->setEnabled(false);
-    
-    m_prevFrameButton = new QPushButton("⏮ Prev Frame", this);
-    m_prevFrameButton->setEnabled(false);
+    m_timeLabel->setStyleSheet("font-family: 'Consolas'; color:#888; font-size:9pt;");
 
-    m_nextFrameButton = new QPushButton("Next Frame ⏭", this);
+    // ── Icon button helper ───────────────────────────────────────────────────
+    const int btnSize = 32;
+    const int iconSize = 28;
+    const QString flatBtnSS =
+        "QPushButton { background:transparent; border:none; }"
+        "QPushButton:hover { background:#222; border-radius:4px; }"
+        "QPushButton:pressed { background:#333; border-radius:4px; }"
+        "QPushButton:disabled { opacity:0.3; }";
+
+    auto makeIconBtn = [&](const QString& iconPath, const QString& tooltip) -> QPushButton* {
+        auto* btn = new QPushButton(this);
+        btn->setFixedSize(btnSize, btnSize);
+        btn->setIconSize(QSize(iconSize, iconSize));
+        btn->setIcon(QIcon(iconPath));
+        btn->setToolTip(tooltip);
+        btn->setStyleSheet(flatBtnSS);
+        btn->setCursor(Qt::PointingHandCursor);
+        return btn;
+    };
+
+    // Buttons — order: Previous, Pause, Stop, Play, Next, Loop
+    m_prevFrameButton = makeIconBtn(":/assets/png/Buttons/Previous_Frame.png", "Previous");
+    m_pauseButton     = makeIconBtn(":/assets/png/Buttons/Pause_Button.png",   "Pause");
+    m_stopButton      = makeIconBtn(":/assets/png/Buttons/Stop_Button.png",    "Stop");
+    m_playButton      = makeIconBtn(":/assets/png/Buttons/Play_Button.png",    "Play");
+    m_nextFrameButton = makeIconBtn(":/assets/png/Buttons/Next_Frame.png",     "Next");
+    m_loopButton      = makeIconBtn(":/assets/png/Buttons/Loop_Button.png",    "Loop");
+
+    m_prevFrameButton->setEnabled(false);
+    m_pauseButton->setEnabled(false);
+    m_stopButton->setEnabled(false);
+    m_playButton->setEnabled(false);
     m_nextFrameButton->setEnabled(false);
 
-    m_loopButton = new QPushButton("Loop", this);
     m_loopButton->setCheckable(true);
     m_loopButton->setChecked(false);
-    m_loopButton->setToolTip("Loop: replay the video continuously when it ends");
 
+    // Loop button starts at 30% opacity (inactive)
+    m_loopOpacity = new QGraphicsOpacityEffect(m_loopButton);
+    m_loopOpacity->setOpacity(0.30);
+    m_loopButton->setGraphicsEffect(m_loopOpacity);
+
+    // Pop-out button (separate, right-aligned)
     m_popOutButton = new QPushButton("\u2922", this);  // ⤢
     m_popOutButton->setFixedSize(28, 28);
-    m_popOutButton->setToolTip("Pop preview out to a floating window (dual-monitor)");
+    m_popOutButton->setToolTip("Pop-out");
+    m_popOutButton->setStyleSheet(
+        "QPushButton { background:transparent; color:#888; border:1px solid #333; "
+        "border-radius:4px; font:bold 11pt 'Consolas'; }"
+        "QPushButton:hover { background:#222; color:#fff; border-color:#555; }");
 
     // Position slider
     m_positionSlider = new QSlider(Qt::Horizontal, this);
     m_positionSlider->setRange(0, 0);
-    
-    // Button layout
+    m_positionSlider->setStyleSheet(
+        "QSlider::groove:horizontal { background:#1e1e1e; height:5px; border-radius:2px; }"
+        "QSlider::handle:horizontal { background:#ff00ff; width:10px; height:10px; "
+        "  margin:-3px 0; border-radius:5px; }"
+        "QSlider::sub-page:horizontal { background:#660066; border-radius:2px; }");
+
+    // ── Button row — centered group ──────────────────────────────────────────
     auto *buttonLayout = new QHBoxLayout;
+    buttonLayout->setSpacing(6);
+    buttonLayout->addStretch(1);
     buttonLayout->addWidget(m_prevFrameButton);
-    buttonLayout->addWidget(m_playButton);
+    buttonLayout->addWidget(m_pauseButton);
     buttonLayout->addWidget(m_stopButton);
+    buttonLayout->addWidget(m_playButton);
     buttonLayout->addWidget(m_nextFrameButton);
     buttonLayout->addWidget(m_loopButton);
     buttonLayout->addStretch(1);
     buttonLayout->addWidget(m_popOutButton);
-    
+
     // Slider layout
     auto *sliderLayout = new QHBoxLayout;
     sliderLayout->addWidget(m_timeLabel);
-    sliderLayout->addWidget(m_positionSlider);
-    
+    sliderLayout->addWidget(m_positionSlider, 1);
+
     // Add all widgets to main layout
     mainLayout->addWidget(m_videoWidget, 1);
     mainLayout->addWidget(m_statusLabel);
     mainLayout->addLayout(sliderLayout);
     mainLayout->addLayout(buttonLayout);
-    
+
     // Connect UI signals
     connect(m_playButton, &QPushButton::clicked, this, &PreviewPlayer::playPause);
+    connect(m_pauseButton, &QPushButton::clicked, this, &PreviewPlayer::playPause);
     connect(m_stopButton, &QPushButton::clicked, this, &PreviewPlayer::stop);
     connect(m_nextFrameButton, &QPushButton::clicked, this, &PreviewPlayer::nextFrame);
     connect(m_prevFrameButton, &QPushButton::clicked, this, &PreviewPlayer::previousFrame);
@@ -115,6 +155,7 @@ void PreviewPlayer::setupUI()
 
     connect(m_loopButton, &QPushButton::toggled, this, [this](bool on) {
         m_mediaPlayer->setLoops(on ? QMediaPlayer::Infinite : 1);
+        m_loopOpacity->setOpacity(on ? 1.0 : 0.30);
     });
 
     connect(m_popOutButton, &QPushButton::clicked, this, &PreviewPlayer::popOutRequested);
@@ -125,6 +166,7 @@ void PreviewPlayer::unloadVideo()
     m_mediaPlayer->stop();
     m_mediaPlayer->setSource(QUrl());  // release file handle
     m_playButton->setEnabled(false);
+    m_pauseButton->setEnabled(false);
     m_stopButton->setEnabled(false);
     m_prevFrameButton->setEnabled(false);
     m_nextFrameButton->setEnabled(false);
@@ -143,6 +185,7 @@ void PreviewPlayer::loadVideo(const QString &filePath)
 
     // Enable controls
     m_playButton->setEnabled(true);
+    m_pauseButton->setEnabled(true);
     m_stopButton->setEnabled(true);
     m_prevFrameButton->setEnabled(true);
     m_nextFrameButton->setEnabled(true);
@@ -151,18 +194,15 @@ void PreviewPlayer::loadVideo(const QString &filePath)
 
     // Auto-play so the re-encoded result is immediately visible after Apply.
     m_mediaPlayer->play();
-    m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPause));
 }
 
 void PreviewPlayer::playPause()
 {
     if (m_mediaPlayer->isPlaying()) {
         m_mediaPlayer->pause();
-        m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
         m_statusLabel->setText("Paused");
     } else {
         m_mediaPlayer->play();
-        m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPause));
         m_statusLabel->setText("Playing...");
     }
 }
@@ -171,7 +211,6 @@ void PreviewPlayer::stop()
 {
     m_mediaPlayer->stop();
     m_positionSlider->setValue(0);
-    m_playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
     m_statusLabel->setText("Stopped");
 }
 

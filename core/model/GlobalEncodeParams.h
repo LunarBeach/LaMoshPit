@@ -83,8 +83,49 @@ struct GlobalEncodeParams {
     //               of P-frames — classic datamosh territory.
     bool killIFrames    = false;
 
+    // ── Scene-cut detection ──────────────────────────────────────────────────
+    //  scenecut  When ON, x264 detects scene transitions and automatically
+    //            inserts I-frames at cuts.  OFF by default (hardcoded scenecut=0)
+    //            to prevent surprise I-frames during datamoshing.
+    bool scenecut       = false;
+
     // ── Lookahead ─────────────────────────────────────────────────────────────
     int  rcLookahead    = -1;  // -1=default; 0..250 frames
+
+    // ── Rate-control fidelity ────────────────────────────────────────────────
+    //  These parameters further inhibit x264's ability to override MB-level
+    //  user edits.  Each has an explicit enable flag — when disabled (default),
+    //  x264 uses its own defaults and the parameter is not emitted.
+    //
+    //  qcomp       QP curve compression: 0.0 = constant bitrate (QP varies
+    //              greatly), 1.0 = constant QP (no variation).  Default 0.6.
+    //  ipratio     I-frame QP ratio vs P-frames.  Default 1.4 (I gets 40 %
+    //              lower QP).  1.0 = treat I same as P.
+    //  pbratio     B-frame QP ratio vs P-frames.  Default 1.3 (B gets 30 %
+    //              higher QP).  1.0 = treat B same as P.
+    //  deadzoneInter  Coefficient deadzone for inter MBs.  Default 21.
+    //                 0 = keep ALL coefficients (maximum fidelity).
+    //  deadzoneIntra  Coefficient deadzone for intra MBs.  Default 11.
+    //                 0 = keep ALL coefficients.
+    //  qblur       Temporal QP smoothing radius.  Default 0.5.
+    //              0.0 = no smoothing (frame-by-frame QP honoured exactly).
+    bool  qcompEnabled        = false;
+    float qcomp               = 0.6f;   // 0.0 .. 1.0
+
+    bool  ipratioEnabled      = false;
+    float ipratio             = 1.4f;   // 1.0 .. 2.0
+
+    bool  pbratioEnabled      = false;
+    float pbratio             = 1.3f;   // 1.0 .. 2.0
+
+    bool  deadzoneInterEnabled = false;
+    int   deadzoneInter       = 21;     // 0 .. 32
+
+    bool  deadzoneIntraEnabled = false;
+    int   deadzoneIntra       = 11;     // 0 .. 32
+
+    bool  qblurEnabled        = false;
+    float qblur               = 0.5f;   // 0.0 .. 10.0
 
     // ── Spatial mask (from MB painter) ────────────────────────────────────────
     //  If non-empty, an additional QP ROI is applied to these MBs on EVERY frame.

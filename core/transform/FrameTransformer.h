@@ -30,7 +30,12 @@ class FrameTransformerWorker : public QObject {
 public:
     enum TargetType { ForceI = 0, ForceP = 1, ForceB = 2,
                       DeleteFrames = 3, DuplicateLeft = 4, DuplicateRight = 5,
-                      MBEditOnly = 6   // re-encode preserving frame types, apply MB edits only
+                      MBEditOnly = 6,   // re-encode preserving frame types, apply MB edits only
+                      InterpolateLeft  = 7,  // insert blended frame between left-neighbour and earliest selected
+                      InterpolateRight = 8,  // insert blended frame between rightmost selected and right-neighbour
+                      ReorderFrames    = 9,  // drag-reorder: frameIndices[0]=src, frameIndices[1]=insertBefore
+                      FlipVertical     = 10, // mirror selected frames upside-down (Y axis)
+                      FlipHorizontal   = 11  // mirror selected frames left-right (X axis)
                     };
 
     // origFrameTypes: display-order frame type chars from the last analysis
@@ -45,6 +50,7 @@ public:
                            const QVector<char>& origFrameTypes  = QVector<char>(),
                            const MBEditMap&     mbEdits          = MBEditMap(),
                            const GlobalEncodeParams& globalParams = GlobalEncodeParams(),
+                           int  interpolateCount = 1,
                            QObject* parent = nullptr);
 
 public slots:
@@ -60,6 +66,10 @@ private:
     // decode/re-encode so original motion vectors are preserved (datamosh).
     void runBitstreamSplice();
 
+    // Full decode → re-encode with frames emitted in a user-specified new order.
+    // frameIndices must be [sourceIdx, insertBeforeIdx].
+    void runReorderFrames();
+
     QString            m_videoPath;
     QVector<int>       m_frameIndices;
     TargetType         m_targetType;
@@ -67,4 +77,5 @@ private:
     QVector<char>      m_origFrameTypes;
     MBEditMap          m_mbEdits;
     GlobalEncodeParams m_globalParams;
+    int                m_interpolateCount = 1;  // only used by InterpolateLeft/Right
 };

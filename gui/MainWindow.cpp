@@ -9,6 +9,7 @@
 #include "BitstreamAnalyzer.h"
 #include "core/pipeline/DecodePipeline.h"
 #include "core/transform/FrameTransformer.h"
+#include "core/presets/PresetManager.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -18,6 +19,7 @@
 #include <QStatusBar>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QDir>
 #include <QFileInfo>
 #include <QPushButton>
@@ -26,6 +28,15 @@
 #include <QThread>
 #include <QFile>
 #include <QAction>
+#include <QDialog>
+#include <QPixmap>
+#include <QPainter>
+#include <QTimer>
+#include <QGraphicsDropShadowEffect>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
+#include <atomic>
+#include <memory>
 #include <cmath>
 
 // =============================================================================
@@ -159,8 +170,14 @@ void MainWindow::buildLayout()
     m_btnForceP   = makeTimelineBtn("Force \u2192 P", "#4488ff", ctrlRow);
     m_btnForceB   = makeTimelineBtn("Force \u2192 B", "#ff64b4", ctrlRow);
     m_btnDelete   = makeTimelineBtn("\u2716 Delete",   "#ff3333", ctrlRow);
-    m_btnDupLeft  = makeTimelineBtn("\u276E Dup",      "#00ff88", ctrlRow);
-    m_btnDupRight = makeTimelineBtn("Dup \u276F",      "#00ff88", ctrlRow);
+    m_btnDupLeft   = makeTimelineBtn("\u276E Dup",         "#00ff88", ctrlRow);
+    m_btnDupRight  = makeTimelineBtn("Dup \u276F",         "#00ff88", ctrlRow);
+    m_btnInterpLeft  = makeTimelineBtn("\u2190 INTERPOLATE", "#ff9900", ctrlRow);
+    m_btnInterpRight = makeTimelineBtn("INTERPOLATE \u2192", "#ff9900", ctrlRow);
+    m_btnFlip  = makeTimelineBtn("Flip",  "#cc88ff", ctrlRow);
+    m_btnFlop  = makeTimelineBtn("Flop",  "#cc88ff", ctrlRow);
+    m_btnFlip->setToolTip("Mirror selected frames vertically (upside-down)");
+    m_btnFlop->setToolTip("Mirror selected frames horizontally (left-right)");
 
     // Undo
     m_btnUndo = new QPushButton("\u21A9 Undo", ctrlRow);
@@ -181,18 +198,17 @@ void MainWindow::buildLayout()
     ctrlLayout->addWidget(m_btnDupLeft);
     ctrlLayout->addWidget(m_btnDupRight);
     ctrlLayout->addSpacing(8);
+    ctrlLayout->addWidget(m_btnInterpLeft);
+    ctrlLayout->addWidget(m_btnInterpRight);
+    ctrlLayout->addSpacing(8);
+    ctrlLayout->addWidget(m_btnFlip);
+    ctrlLayout->addWidget(m_btnFlop);
+    ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnDelete);
     ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnUndo);
 
     ctrlLayout->addStretch(1);
-
-    m_progressBar = new QProgressBar(ctrlRow);
-    m_progressBar->setFixedHeight(14);
-    m_progressBar->setFixedWidth(180);
-    m_progressBar->setRange(0, 100);
-    m_progressBar->setVisible(false);
-    ctrlLayout->addWidget(m_progressBar);
 
     tlLayout->addWidget(ctrlRow);
 
@@ -204,6 +220,7 @@ void MainWindow::buildLayout()
     m_bottomSplitter->setHandleWidth(4);
 
     m_quickMosh   = new QuickMoshWidget(this);
+    m_progressBar = m_quickMosh->progressBar();  // progress bar lives in the Quick Mosh banner
     m_globalParams = new GlobalParamsWidget(this);
 
     // Bitstream debug widget — hidden by default, toggled from View menu
@@ -249,16 +266,25 @@ void MainWindow::buildLayout()
     connect(m_globalParams, &GlobalParamsWidget::applyRequested,
             this, &MainWindow::onApplyGlobalParams);
 
-    connect(m_quickMosh, &QuickMoshWidget::moshRequested,
-            this, &MainWindow::onQuickMosh);
+    connect(m_quickMosh, &QuickMoshWidget::saveUserPresetRequested,
+            this, &MainWindow::onQuickMoshSaveUserPreset);
+    connect(m_quickMosh, &QuickMoshWidget::userMoshRequested,
+            this, &MainWindow::onQuickMoshUserMosh);
 
-    connect(m_btnForceI,   &QPushButton::clicked, this, &MainWindow::onForceI);
-    connect(m_btnForceP,   &QPushButton::clicked, this, &MainWindow::onForceP);
-    connect(m_btnForceB,   &QPushButton::clicked, this, &MainWindow::onForceB);
-    connect(m_btnDelete,   &QPushButton::clicked, this, &MainWindow::onDeleteFrames);
-    connect(m_btnDupLeft,  &QPushButton::clicked, this, &MainWindow::onDupLeft);
-    connect(m_btnDupRight, &QPushButton::clicked, this, &MainWindow::onDupRight);
-    connect(m_btnUndo,     &QPushButton::clicked, this, &MainWindow::onUndo);
+    connect(m_btnForceI,     &QPushButton::clicked, this, &MainWindow::onForceI);
+    connect(m_btnForceP,     &QPushButton::clicked, this, &MainWindow::onForceP);
+    connect(m_btnForceB,     &QPushButton::clicked, this, &MainWindow::onForceB);
+    connect(m_btnDelete,     &QPushButton::clicked, this, &MainWindow::onDeleteFrames);
+    connect(m_btnDupLeft,    &QPushButton::clicked, this, &MainWindow::onDupLeft);
+    connect(m_btnDupRight,   &QPushButton::clicked, this, &MainWindow::onDupRight);
+    connect(m_btnInterpLeft,  &QPushButton::clicked, this, &MainWindow::onInterpLeft);
+    connect(m_btnInterpRight, &QPushButton::clicked, this, &MainWindow::onInterpRight);
+    connect(m_btnFlip,       &QPushButton::clicked, this, &MainWindow::onFlip);
+    connect(m_btnFlop,       &QPushButton::clicked, this, &MainWindow::onFlop);
+    connect(m_btnUndo,       &QPushButton::clicked, this, &MainWindow::onUndo);
+
+    connect(m_timeline, &TimelineWidget::frameReorderRequested,
+            this, &MainWindow::onFrameReorderRequested);
 }
 
 // =============================================================================
@@ -335,33 +361,150 @@ void MainWindow::openFile()
 
     if (fileName.isEmpty()) return;
 
-    statusBar()->showMessage("Importing and standardizing video...");
-
     QDir importDir(QDir::currentPath() + "/imported_videos");
     if (!importDir.exists()) importDir.mkpath(".");
 
     QString baseName   = QFileInfo(fileName).completeBaseName();
     QString outputPath = importDir.absoluteFilePath(baseName + "_imported.mp4");
 
-    if (!DecodePipeline::standardizeVideo(fileName, outputPath)) {
-        statusBar()->showMessage("Import failed.");
-        QMessageBox::warning(this, "Import Failed", "Failed to transcode the video.");
-        return;
+    // ── Splash dialog ─────────────────────────────────────────────────────────
+    auto* splash = new QDialog(this, Qt::FramelessWindowHint | Qt::Dialog);
+    splash->setFixedSize(560, 340);
+    splash->setAttribute(Qt::WA_DeleteOnClose);
+    splash->setStyleSheet("background:#0a0a0a; border:2px solid #00ff88; border-radius:8px;");
+
+    auto* sLayout = new QVBoxLayout(splash);
+    sLayout->setContentsMargins(20, 20, 20, 20);
+    sLayout->setSpacing(12);
+
+    // Background image
+    auto* bgLabel = new QLabel(splash);
+    QPixmap bg(":/assets/png/Open_Video_Splash_Background.png");
+    if (!bg.isNull()) {
+        bgLabel->setPixmap(bg.scaled(splash->size(), Qt::KeepAspectRatioByExpanding,
+                                     Qt::SmoothTransformation));
+        bgLabel->setGeometry(0, 0, splash->width(), splash->height());
+        bgLabel->lower();
     }
 
-    m_currentVideoPath = outputPath;
+    sLayout->addStretch(1);
 
-    if (m_hasUndo && !m_undoBackupPath.isEmpty()) {
-        QFile::remove(m_undoBackupPath);
-        m_hasUndo = false;
-    }
-    m_btnUndo->setEnabled(false);
+    // Header text with pulsing glow
+    auto* headerLbl = new QLabel("You might think you're ready...\nbut you're not.", splash);
+    headerLbl->setAlignment(Qt::AlignCenter);
+    headerLbl->setStyleSheet(
+        "color:#00ff88; font:bold 16pt 'Consolas'; background:transparent; border:none;");
+    auto* glow = new QGraphicsDropShadowEffect(headerLbl);
+    glow->setColor(QColor(0x00, 0xff, 0x88, 180));
+    glow->setBlurRadius(20);
+    glow->setOffset(0, 0);
+    headerLbl->setGraphicsEffect(glow);
+    sLayout->addWidget(headerLbl);
 
-    statusBar()->showMessage("Imported: " + baseName + "_imported.mp4 — analyzing...");
-    m_preview->loadVideo(m_currentVideoPath);
-    m_videoSequence->load(m_currentVideoPath);
+    // Pulse the glow
+    auto* pulseTimer = new QTimer(splash);
+    int pulsePhase = 0;
+    connect(pulseTimer, &QTimer::timeout, splash, [glow, &pulsePhase]() {
+        pulsePhase = (pulsePhase + 6) % 360;
+        double t = (1.0 + sin(pulsePhase * 3.14159265 / 180.0)) / 2.0;
+        int alpha = 80 + (int)(175 * t);
+        int blur  = 12 + (int)(18 * t);
+        glow->setColor(QColor(0x00, 0xff, 0x88, alpha));
+        glow->setBlurRadius(blur);
+    });
+    pulseTimer->start(40);
 
-    analyzeImportedVideo(m_currentVideoPath);
+    // Progress bar (determinate — updated by worker thread via shared atomics)
+    auto* progressBar = new QProgressBar(splash);
+    progressBar->setRange(0, 100);
+    progressBar->setValue(0);
+    progressBar->setFixedHeight(14);
+    progressBar->setTextVisible(false);
+    progressBar->setStyleSheet(
+        "QProgressBar { background:#111; border:1px solid #00ff88; border-radius:6px; }"
+        "QProgressBar::chunk { background:qlineargradient("
+        "x1:0,y1:0,x2:1,y2:0, stop:0 #003311, stop:0.5 #00ff88, stop:1 #003311); "
+        "border-radius:5px; }");
+    sLayout->addWidget(progressBar);
+
+    // Percentage label
+    auto* pctLabel = new QLabel("0%", splash);
+    pctLabel->setAlignment(Qt::AlignCenter);
+    pctLabel->setStyleSheet(
+        "color:#00ff88; font:bold 9pt 'Consolas'; background:transparent; border:none;");
+    sLayout->addWidget(pctLabel);
+
+    // Status text
+    auto* statusLbl = new QLabel(splash);
+    statusLbl->setAlignment(Qt::AlignCenter);
+    statusLbl->setWordWrap(true);
+    statusLbl->setStyleSheet(
+        "color:#00ff88; font:8pt 'Consolas'; background:#0a0a0a; border:none; "
+        "padding:4px 8px; border-radius:4px;");
+    statusLbl->setText(QString("Creating mosh pit proxy file in %1").arg(
+        QDir::toNativeSeparators(importDir.absolutePath())));
+    sLayout->addWidget(statusLbl);
+
+    sLayout->addStretch(1);
+
+    splash->show();
+    splash->raise();
+
+    // ── Shared progress state (written by worker, read by UI timer) ──────────
+    auto progressCurrent = std::make_shared<std::atomic<int>>(0);
+    auto progressTotal   = std::make_shared<std::atomic<int>>(0);
+
+    auto* progressTimer = new QTimer(splash);
+    connect(progressTimer, &QTimer::timeout, splash,
+            [progressBar, pctLabel, progressCurrent, progressTotal]() {
+        int cur = progressCurrent->load();
+        int tot = progressTotal->load();
+        if (tot > 0) {
+            int pct = qBound(0, (int)((qint64)cur * 100 / tot), 100);
+            progressBar->setValue(pct);
+            pctLabel->setText(QString::number(pct) + "%");
+        }
+    });
+    progressTimer->start(60);
+
+    // ── Run standardizeVideo on a worker thread ───────────────────────────────
+    auto* watcher = new QFutureWatcher<bool>(splash);
+    connect(watcher, &QFutureWatcher<bool>::finished, this,
+            [this, splash, watcher, outputPath, baseName, progressBar, pctLabel]() {
+        bool ok = watcher->result();
+        progressBar->setValue(100);
+        pctLabel->setText("100%");
+        splash->close();
+
+        if (!ok) {
+            statusBar()->showMessage("Import failed.");
+            QMessageBox::warning(this, "Import Failed", "Failed to transcode the video.");
+            return;
+        }
+
+        m_currentVideoPath = outputPath;
+
+        if (m_hasUndo && !m_undoBackupPath.isEmpty()) {
+            QFile::remove(m_undoBackupPath);
+            m_hasUndo = false;
+        }
+        m_btnUndo->setEnabled(false);
+
+        statusBar()->showMessage("Imported: " + baseName + "_imported.mp4 \xe2\x80\x94 analyzing...");
+        m_preview->loadVideo(m_currentVideoPath);
+        m_videoSequence->load(m_currentVideoPath);
+
+        analyzeImportedVideo(m_currentVideoPath);
+    });
+
+    watcher->setFuture(QtConcurrent::run(
+            [fileName, outputPath, progressCurrent, progressTotal]() {
+        return DecodePipeline::standardizeVideo(fileName, outputPath,
+            [progressCurrent, progressTotal](int cur, int tot) {
+                progressCurrent->store(cur);
+                progressTotal->store(tot);
+            });
+    }));
 }
 
 // =============================================================================
@@ -433,12 +576,16 @@ void MainWindow::onSelectionChanged(const QVector<int>& selected)
 
 void MainWindow::setTransformButtonsEnabled(bool enabled)
 {
-    m_btnForceI  ->setEnabled(enabled);
-    m_btnForceP  ->setEnabled(enabled);
-    m_btnForceB  ->setEnabled(enabled);
-    m_btnDelete  ->setEnabled(enabled);
-    m_btnDupLeft ->setEnabled(enabled);
-    m_btnDupRight->setEnabled(enabled);
+    m_btnForceI    ->setEnabled(enabled);
+    m_btnForceP    ->setEnabled(enabled);
+    m_btnForceB    ->setEnabled(enabled);
+    m_btnDelete    ->setEnabled(enabled);
+    m_btnDupLeft   ->setEnabled(enabled);
+    m_btnDupRight  ->setEnabled(enabled);
+    m_btnInterpLeft ->setEnabled(enabled);
+    m_btnInterpRight->setEnabled(enabled);
+    m_btnFlip       ->setEnabled(enabled);
+    m_btnFlop       ->setEnabled(enabled);
     m_quickMosh->setMoshEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
 }
 
@@ -446,23 +593,55 @@ void MainWindow::setTransformButtonsEnabled(bool enabled)
 // Frame type conversion
 // =============================================================================
 
-void MainWindow::onForceI()       { startTransform(FrameTransformerWorker::ForceI); }
-void MainWindow::onForceP()       { startTransform(FrameTransformerWorker::ForceP); }
-void MainWindow::onForceB()       { startTransform(FrameTransformerWorker::ForceB); }
-void MainWindow::onDeleteFrames() { startTransform(FrameTransformerWorker::DeleteFrames); }
-void MainWindow::onDupLeft()      { startTransform(FrameTransformerWorker::DuplicateLeft); }
-void MainWindow::onDupRight()     { startTransform(FrameTransformerWorker::DuplicateRight); }
+void MainWindow::onForceI()        { startTransform(FrameTransformerWorker::ForceI); }
+void MainWindow::onForceP()        { startTransform(FrameTransformerWorker::ForceP); }
+void MainWindow::onForceB()        { startTransform(FrameTransformerWorker::ForceB); }
+void MainWindow::onDeleteFrames()  { startTransform(FrameTransformerWorker::DeleteFrames); }
+void MainWindow::onDupLeft()       { startTransform(FrameTransformerWorker::DuplicateLeft); }
+void MainWindow::onDupRight()      { startTransform(FrameTransformerWorker::DuplicateRight); }
+void MainWindow::onFlip()          { startTransform(FrameTransformerWorker::FlipVertical); }
+void MainWindow::onFlop()          { startTransform(FrameTransformerWorker::FlipHorizontal); }
+static int askInterpolateCount(QWidget* parent, const QString& direction)
+{
+    bool ok = false;
+    int n = QInputDialog::getInt(
+        parent,
+        QString("Interpolate %1").arg(direction),
+        "Number of intermediate frames to insert:",
+        5,          // default
+        1,          // min
+        120,        // max
+        1,          // step
+        &ok);
+    return ok ? n : 0;  // 0 = user cancelled
+}
+
+void MainWindow::onInterpLeft()
+{
+    int n = askInterpolateCount(this, "Left");
+    if (n > 0) startTransform(FrameTransformerWorker::InterpolateLeft,
+                               GlobalEncodeParams(), n);
+}
+
+void MainWindow::onInterpRight()
+{
+    int n = askInterpolateCount(this, "Right");
+    if (n > 0) startTransform(FrameTransformerWorker::InterpolateRight,
+                               GlobalEncodeParams(), n);
+}
 void MainWindow::onApplyGlobalParams()
 {
     startTransform(FrameTransformerWorker::MBEditOnly, m_globalParams->currentParams());
 }
 
 // =============================================================================
-// Quick Mosh
+// Quick Mosh — PLACEHOLDER
 // =============================================================================
+// Built-in Quick Mosh presets removed. This section will be re-populated
+// after MB Editor and Global Encode presets are validated.
 
-void MainWindow::onQuickMosh(int presetIndex)
-{
+#if 0  // ── onQuickMosh removed — no built-in Quick Mosh presets ──────────────
+static void onQuickMosh_REMOVED() {
     if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
 
     const int total = m_lastAnalysis.frames.size();
@@ -2049,13 +2228,127 @@ void MainWindow::onQuickMosh(int presetIndex)
     m_mbWidget->loadEditMap(edits);
     startTransform(FrameTransformerWorker::MBEditOnly, gp);
 }
+#endif // ── end of removed onQuickMosh ────────────────────────────────────────
+
+// =============================================================================
+// Quick Mosh — user preset save / load
+// =============================================================================
+
+void MainWindow::onQuickMoshSaveUserPreset()
+{
+    if (m_currentVideoPath.isEmpty()) {
+        QMessageBox::information(this, "No Video",
+            "Open a video first before saving a Quick Mosh preset.");
+        return;
+    }
+
+    bool ok = false;
+    const QString name = QInputDialog::getText(this,
+        "Save Quick Mosh Preset",
+        "Preset name\n(captures current MB Editor controls + Global Encode Params):",
+        QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    const FrameMBParams mb = m_mbWidget->currentControlParams();
+    const GlobalEncodeParams gp = m_globalParams->currentParams();
+
+    if (!PresetManager::saveQuickMosh(name, mb, gp)) {
+        QMessageBox::warning(this, "Save Failed",
+            QString("Could not save Quick Mosh preset \"%1\".").arg(name));
+        return;
+    }
+    m_quickMosh->refreshUserPresets();
+}
+
+void MainWindow::onQuickMoshUserMosh(const QString& presetName)
+{
+    if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
+    if (m_lastAnalysis.frames.isEmpty()) return;
+
+    FrameMBParams mb;
+    GlobalEncodeParams gp;
+    if (!PresetManager::loadQuickMosh(presetName, mb, gp)) {
+        QMessageBox::warning(this, "Load Failed",
+            QString("Could not load Quick Mosh preset \"%1\".").arg(presetName));
+        return;
+    }
+
+    // Apply the loaded MB params to every frame, spread across the whole clip.
+    const int total = m_lastAnalysis.frames.size();
+    MBEditMap edits;
+    for (int i = 0; i < total; ++i) edits[i] = mb;
+
+    m_mbWidget->loadEditMap(edits);
+    startTransform(FrameTransformerWorker::MBEditOnly, gp);
+}
+
+// =============================================================================
+// onFrameReorderRequested — called when the user drag-drops a frame in the
+// timeline.  Builds a ReorderFrames worker directly (bypasses startTransform
+// because the frame-index payload has a different meaning here).
+// =============================================================================
+
+void MainWindow::onFrameReorderRequested(int sourceIdx, int insertBeforeIdx)
+{
+    if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
+    if (m_lastAnalysis.frames.isEmpty()) return;
+
+    // Sanity bounds
+    const int total = m_lastAnalysis.frames.size();
+    if (sourceIdx < 0 || sourceIdx >= total) return;
+    insertBeforeIdx = qBound(0, insertBeforeIdx, total);
+
+    // No-op: dropped at its own position or immediately after
+    if (insertBeforeIdx == sourceIdx || insertBeforeIdx == sourceIdx + 1) return;
+
+    // Backup for undo
+    m_undoBackupPath = m_currentVideoPath + ".undo_backup.mp4";
+    QFile::remove(m_undoBackupPath);
+    if (!QFile::copy(m_currentVideoPath, m_undoBackupPath)) {
+        m_hasUndo = false;
+        m_btnUndo->setEnabled(false);
+    } else {
+        m_hasUndo = true;
+        m_btnUndo->setEnabled(false);
+    }
+
+    m_preview->unloadVideo();
+    m_transformBusy = true;
+    setTransformButtonsEnabled(false);
+    m_quickMosh->setProgressVisible(true);
+    m_progressBar->setRange(0, total);
+    m_progressBar->setValue(0);
+    statusBar()->showMessage(
+        QString("Reordering: moving frame %1 to position %2 ...")
+            .arg(sourceIdx).arg(insertBeforeIdx));
+
+    auto* worker = new FrameTransformerWorker(
+        m_currentVideoPath,
+        QVector<int>{ sourceIdx, insertBeforeIdx },
+        FrameTransformerWorker::ReorderFrames,
+        total,
+        QVector<char>(), MBEditMap(), GlobalEncodeParams(), 1, nullptr);
+
+    auto* thread = new QThread(this);
+    worker->moveToThread(thread);
+    connect(thread, &QThread::started,  worker, &FrameTransformerWorker::run);
+    connect(worker, &FrameTransformerWorker::progress,
+            this,   &MainWindow::onTransformProgress);
+    connect(worker, &FrameTransformerWorker::done,
+            this,   &MainWindow::onTransformDone);
+    connect(worker, &FrameTransformerWorker::done,  thread, &QThread::quit);
+    connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
 
 // =============================================================================
 // startTransform
 // =============================================================================
 
 void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
-                                const GlobalEncodeParams& globalParams)
+                                const GlobalEncodeParams& globalParams,
+                                int interpolateCount)
 {
     if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
 
@@ -2107,7 +2400,7 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
     m_preview->unloadVideo();
     m_transformBusy = true;
     setTransformButtonsEnabled(false);
-    m_progressBar->setVisible(true);
+    m_quickMosh->setProgressVisible(true);
     m_progressBar->setRange(0, m_lastAnalysis.frames.size());
     m_progressBar->setValue(0);
 
@@ -2118,11 +2411,14 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
                 .arg(m_lastAnalysis.frames.size() == 1 ? "" : "s"));
     } else {
         static const char* names[] = {
-            "I","P","B","deleted","dup-left","dup-right","MB edit"
+            "I","P","B","deleted","dup-left","dup-right","MB edit",
+            "interp-left","interp-right"
         };
+        const char* typeName = (type < (int)(sizeof(names)/sizeof(names[0])))
+                               ? names[type] : "transform";
         statusBar()->showMessage(
             QString("Processing %1 frame%2 → %3 ...")
-                .arg(sel.size()).arg(sel.size() == 1 ? "" : "s").arg(names[type]));
+                .arg(sel.size()).arg(sel.size() == 1 ? "" : "s").arg(typeName));
     }
 
     QVector<char> origTypes;
@@ -2136,7 +2432,7 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
     auto* worker = new FrameTransformerWorker(
         m_currentVideoPath, sel, type,
         m_lastAnalysis.frames.size(), origTypes,
-        edits, globalParams, nullptr);
+        edits, globalParams, interpolateCount, nullptr);
     auto* thread = new QThread(this);
     worker->moveToThread(thread);
 
@@ -2166,7 +2462,7 @@ void MainWindow::onTransformProgress(int current, int /*total*/)
 void MainWindow::onTransformDone(bool success, QString errorMessage)
 {
     m_transformBusy = false;
-    m_progressBar->setVisible(false);
+    m_quickMosh->setProgressVisible(false);
 
     if (!success) {
         statusBar()->showMessage("Transform failed: " + errorMessage);

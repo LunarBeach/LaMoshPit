@@ -6,6 +6,7 @@
 #include <QList>
 
 #include "core/model/MBEditData.h"
+#include "core/presets/PresetManager.h"
 #include "gui/BitstreamAnalyzer.h"
 
 class MBCanvas;
@@ -14,8 +15,10 @@ class QLabel;
 class QDial;
 class QSlider;
 class QSpinBox;
+class QComboBox;
 class QScrollArea;
 class QSplitter;
+class QVBoxLayout;
 
 // =============================================================================
 // MacroblockWidget
@@ -69,6 +72,16 @@ public:
     // knob edits are replicated across every frame in the active range.
     void setActiveFrameRange(const QVector<int>& frames);
 
+    // ── User preset API ───────────────────────────────────────────────────────
+    // Read the current knob values (no selectedMBs).
+    FrameMBParams currentControlParams() const;
+
+    // Apply knob values to all frames in the active range; selectedMBs preserved.
+    void applyControlParams(const FrameMBParams& p);
+
+    // Reload the user-preset combo from disk (called after save/delete/import).
+    void refreshUserPresets();
+
 signals:
     // Emitted when the user navigates via Prev/Next buttons.
     // MainWindow connects this to update the timeline selection.
@@ -83,6 +96,11 @@ private slots:
     void onNext();
     void onClearFrame();
     void onMBSelectionChanged(const QSet<int>& sel);
+
+    // User preset slots
+    void onUserPresetSave();
+    void onUserPresetDelete();
+    void onUserPresetImport();
 
 private:
     void navigateTo(int frameIdx);
@@ -150,6 +168,22 @@ private:
     QDial* m_dialColorTwistU;  QSpinBox* m_sbColorTwistU;
     QDial* m_dialColorTwistV;  QSpinBox* m_sbColorTwistV;
 
+    // ── Knobs — NEW PIXEL-DOMAIN ─────────────────────────────────────────
+    QDial* m_dialPosterize;    QSpinBox* m_sbPosterize;
+    QDial* m_dialPixelShuffle; QSpinBox* m_sbPixelShuffle;
+    QDial* m_dialSharpen;      QSpinBox* m_sbSharpen;
+    QDial* m_dialTempDiffAmp;  QSpinBox* m_sbTempDiffAmp;
+    QDial* m_dialHueRotate;    QSpinBox* m_sbHueRotate;
+
+    // ── Knobs — BITSTREAM SURGERY ────────────────────────────────────────
+    QDial* m_dialBsMvdX;       QSpinBox* m_sbBsMvdX;
+    QDial* m_dialBsMvdY;       QSpinBox* m_sbBsMvdY;
+    QDial* m_dialBsForceSkip;  QSpinBox* m_sbBsForceSkip;
+    QDial* m_dialBsIntraMode;  QSpinBox* m_sbBsIntraMode;
+    QDial* m_dialBsMbType;     QSpinBox* m_sbBsMbType;
+    QDial* m_dialBsDctScale;   QSpinBox* m_sbBsDctScale;
+    QDial* m_dialBsCbpZero;    QSpinBox* m_sbBsCbpZero;
+
     // All knob widgets — for bulk enable/disable and signal blocking
     QList<QDial*>    m_allDials;
     QList<QSpinBox*> m_allSpinboxes;
@@ -161,4 +195,18 @@ private:
     QLabel*      m_lblZoom;
     QPushButton* m_btnClearFrame;
     QPushButton* m_btnClearAll;
+    QPushButton* m_btnBrushAdd  { nullptr };
+    QPushButton* m_btnBrushSub  { nullptr };
+
+    // ── Pop-out support: wrapper widgets for nav/brush rows ──────────────
+    QWidget*     m_navBar       { nullptr };
+    QWidget*     m_brushBar     { nullptr };
+    QWidget*     m_popOutWindow { nullptr };
+    QVBoxLayout* m_controlsLayout { nullptr }; // ref to main controls layout
+
+    // ── Preset combo (built-in + user presets unified) ─────────────────
+    QComboBox*   m_presetCombo     { nullptr };
+    QPushButton* m_btnUserPresetSave{ nullptr };
+    QPushButton* m_btnUserPresetDel { nullptr };
+    QPushButton* m_btnUserPresetImport{ nullptr };
 };

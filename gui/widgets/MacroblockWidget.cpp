@@ -1,6 +1,7 @@
 #include "MacroblockWidget.h"
 
 #include "core/logger/ControlLogger.h"
+#include "core/presets/PresetManager.h"
 
 #include <QPainter>
 #include <QMouseEvent>
@@ -8,6 +9,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QPushButton>
 #include <QLabel>
@@ -16,6 +18,10 @@
 #include <QSpinBox>
 #include <QGroupBox>
 #include <QComboBox>
+#include <QInputDialog>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QtConcurrent/QtConcurrent>
 #include <QDebug>
 
@@ -127,6 +133,17 @@ done:
 }
 
 // =============================================================================
+// NoScrollSpinBox — QSpinBox that ignores scroll-wheel events.
+// Forces the user to click inside and type intentionally.
+// =============================================================================
+class NoScrollSpinBox : public QSpinBox {
+public:
+    using QSpinBox::QSpinBox;
+protected:
+    void wheelEvent(QWheelEvent* e) override { e->ignore(); }
+};
+
+// =============================================================================
 // MBCanvas — custom widget: video frame + MB grid + painted selection.
 // Left-drag  = select MBs.   Right-drag = erase selection.
 // =============================================================================
@@ -154,9 +171,12 @@ public:
     const QSet<int>& selection() const { return m_selection; }
     void clearSelection() { m_selection.clear(); update(); emit selectionChanged(m_selection); }
     void setBrushSize(int s) { m_brushSize = qBound(1, s, 16); }
+    void setDeselectMode(bool on) { m_deselectMode = on; }
+    bool deselectMode() const { return m_deselectMode; }
 
 signals:
     void selectionChanged(const QSet<int>& sel);
+    void panRequested(QPoint delta);
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -212,22 +232,48 @@ protected:
 
     void mousePressEvent(QMouseEvent* e) override
     {
+        if (e->button() == Qt::MiddleButton) {
+            m_panning = true;
+            m_panLastPos = e->globalPosition().toPoint();
+            setCursor(Qt::ClosedHandCursor);
+            e->accept();
+            return;
+        }
         if (m_frame.isNull()) return;
         m_painting = true;
-        m_erasing  = (e->button() == Qt::RightButton);
+        // Right-button always erases; left-button uses the mode toggle,
+        // but Alt temporarily inverts the mode.
+        bool rightBtn = (e->button() == Qt::RightButton);
+        bool altHeld  = (e->modifiers() & Qt::AltModifier);
+        m_erasing = rightBtn || (m_deselectMode != altHeld);
         applyBrush(e->position(), !m_erasing);
         e->accept();
     }
 
     void mouseMoveEvent(QMouseEvent* e) override
     {
+        if (m_panning) {
+            QPoint delta = e->globalPosition().toPoint() - m_panLastPos;
+            m_panLastPos = e->globalPosition().toPoint();
+            emit panRequested(delta);
+            e->accept();
+            return;
+        }
         m_cursorPos = e->position().toPoint();
         if (m_painting) applyBrush(e->position(), !m_erasing);
         else            update();
         e->accept();
     }
 
-    void mouseReleaseEvent(QMouseEvent* e) override { m_painting = false; e->accept(); }
+    void mouseReleaseEvent(QMouseEvent* e) override
+    {
+        if (e->button() == Qt::MiddleButton && m_panning) {
+            m_panning = false;
+            setCursor(Qt::ArrowCursor);
+        }
+        m_painting = false;
+        e->accept();
+    }
 
     void leaveEvent(QEvent* e) override
     {
@@ -288,12 +334,15 @@ private:
 
     QImage    m_frame;
     QSet<int> m_selection;
-    int       m_mbCols    = 0;
-    int       m_mbRows    = 0;
-    int       m_brushSize = 1;
-    bool      m_painting  = false;
-    bool      m_erasing   = false;
-    QPoint    m_cursorPos = {-1, -1};
+    int       m_mbCols      = 0;
+    int       m_mbRows      = 0;
+    int       m_brushSize   = 1;
+    bool      m_painting    = false;
+    bool      m_erasing     = false;
+    bool      m_deselectMode = false;
+    bool      m_panning     = false;
+    QPoint    m_panLastPos;
+    QPoint    m_cursorPos   = {-1, -1};
 };
 
 // =============================================================================
@@ -330,6 +379,12 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     m_canvas = new MBCanvas(this);
     connect(m_canvas, &MBCanvas::selectionChanged,
             this, &MacroblockWidget::onMBSelectionChanged);
+    connect(m_canvas, &MBCanvas::panRequested, this, [this](QPoint delta) {
+        auto* hb = m_canvasScroll->horizontalScrollBar();
+        auto* vb = m_canvasScroll->verticalScrollBar();
+        hb->setValue(hb->value() - delta.x());
+        vb->setValue(vb->value() - delta.y());
+    });
 
     m_canvasScroll = new QScrollArea(this);
     m_canvasScroll->setWidget(m_canvas);
@@ -355,9 +410,9 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
 
     auto* controlsWidget = new QWidget(this);
     controlsWidget->setMinimumHeight(80);
-    auto* controlsLayout = new QVBoxLayout(controlsWidget);
-    controlsLayout->setContentsMargins(0, 4, 0, 0);
-    controlsLayout->setSpacing(4);
+    m_controlsLayout = new QVBoxLayout(controlsWidget);
+    m_controlsLayout->setContentsMargins(0, 4, 0, 0);
+    m_controlsLayout->setSpacing(4);
 
     m_innerSplitter->addWidget(m_canvasScroll);
     m_innerSplitter->addWidget(controlsWidget);
@@ -365,45 +420,66 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     m_innerSplitter->setStretchFactor(1, 1);
     root->addWidget(m_innerSplitter, 1);
 
-    // ── Navigation row ───────────────────────────────────────────────────────
-    auto* navRow = new QHBoxLayout;
-    m_btnPrev  = new QPushButton("\u276E", this);
-    m_btnNext  = new QPushButton("\u276F", this);
-    m_navLabel = new QLabel("No video loaded", this);
-    m_navLabel->setAlignment(Qt::AlignCenter);
-    m_navLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
-    m_btnPrev->setFixedSize(28, 28);
-    m_btnNext->setFixedSize(28, 28);
-    m_btnPrev->setStyleSheet(kDarkBtn);
-    m_btnNext->setStyleSheet(kDarkBtn);
-    m_btnPrev->setEnabled(false);
-    m_btnNext->setEnabled(false);
-    m_btnPopOutCanvas = new QPushButton("\u2922", this);  // ⤢
-    m_btnPopOutCanvas->setFixedSize(28, 28);
-    m_btnPopOutCanvas->setToolTip("Pop canvas out to a floating window");
-    m_btnPopOutCanvas->setStyleSheet(kDarkBtn);
-    m_btnPopOutCanvas->setEnabled(false);
-    navRow->addWidget(m_btnPrev);
-    navRow->addWidget(m_navLabel, 1);
-    navRow->addWidget(m_btnNext);
-    navRow->addWidget(m_btnPopOutCanvas);
-    controlsLayout->addLayout(navRow);
+    // ── Navigation bar (wrapped in QWidget for pop-out reparenting) ──────────
+    m_navBar = new QWidget(this);
+    m_navBar->setStyleSheet("background:transparent;");
+    {
+        auto* navRow = new QHBoxLayout(m_navBar);
+        navRow->setContentsMargins(0, 0, 0, 0);
+        navRow->setSpacing(4);
+        m_btnPrev  = new QPushButton("\u276E", m_navBar);
+        m_btnNext  = new QPushButton("\u276F", m_navBar);
+        m_navLabel = new QLabel("No video loaded", m_navBar);
+        m_navLabel->setAlignment(Qt::AlignCenter);
+        m_navLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
+        m_btnPrev->setFixedSize(28, 28);
+        m_btnNext->setFixedSize(28, 28);
+        m_btnPrev->setStyleSheet(kDarkBtn);
+        m_btnNext->setStyleSheet(kDarkBtn);
+        m_btnPrev->setEnabled(false);
+        m_btnNext->setEnabled(false);
+        m_btnPopOutCanvas = new QPushButton("\u2922", m_navBar);  // ⤢
+        m_btnPopOutCanvas->setFixedSize(28, 28);
+        m_btnPopOutCanvas->setToolTip("Pop canvas out to a floating window");
+        m_btnPopOutCanvas->setStyleSheet(kDarkBtn);
+        m_btnPopOutCanvas->setEnabled(false);
+        navRow->addWidget(m_btnPrev);
+        navRow->addWidget(m_navLabel, 1);
+        navRow->addWidget(m_btnNext);
+        navRow->addWidget(m_btnPopOutCanvas);
+    }
+    m_controlsLayout->addWidget(m_navBar);
 
     connect(m_btnPrev, &QPushButton::clicked, this, &MacroblockWidget::onPrev);
     connect(m_btnNext, &QPushButton::clicked, this, &MacroblockWidget::onNext);
     connect(m_btnPopOutCanvas, &QPushButton::clicked, this, [this]() {
         if (m_canvasIsPopped) {
+            // ── Dock back ──────────────────────────────────────────────
+            m_controlsLayout->insertWidget(0, m_navBar);
+            m_navBar->show();
             m_innerSplitter->insertWidget(0, m_canvasScroll);
             m_canvasScroll->show();
+            // m_brushBar goes back at the end of controlsLayout
+            m_controlsLayout->addWidget(m_brushBar);
+            m_brushBar->show();
+            if (m_popOutWindow) { m_popOutWindow->deleteLater(); m_popOutWindow = nullptr; }
             m_btnPopOutCanvas->setText("\u2922");
             m_canvasIsPopped = false;
         } else {
-            m_canvasScroll->setParent(nullptr);
-            m_canvasScroll->setWindowTitle("MB Canvas \u2014 LaMoshPit");
-            m_canvasScroll->setAttribute(Qt::WA_DeleteOnClose, false);
-            m_canvasScroll->installEventFilter(this);
-            m_canvasScroll->resize(700, 500);
-            m_canvasScroll->show();
+            // ── Pop out ────────────────────────────────────────────────
+            m_popOutWindow = new QWidget(nullptr);
+            m_popOutWindow->setWindowTitle("MB Canvas \u2014 LaMoshPit");
+            m_popOutWindow->setAttribute(Qt::WA_DeleteOnClose, false);
+            m_popOutWindow->setStyleSheet("background:#0a0a0a;");
+            m_popOutWindow->installEventFilter(this);
+            auto* popLayout = new QVBoxLayout(m_popOutWindow);
+            popLayout->setContentsMargins(4, 4, 4, 4);
+            popLayout->setSpacing(4);
+            popLayout->addWidget(m_navBar);
+            popLayout->addWidget(m_canvasScroll, 1);
+            popLayout->addWidget(m_brushBar);
+            m_popOutWindow->resize(800, 600);
+            m_popOutWindow->show();
             m_btnPopOutCanvas->setText("\u2921");  // ⤡ (dock-back icon)
             m_canvasIsPopped = true;
         }
@@ -437,7 +513,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         m_lblZoom->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         zoomRow->addWidget(m_lblZoom);
 
-        controlsLayout->addLayout(zoomRow);
+        m_controlsLayout->addLayout(zoomRow);
 
         connect(m_sliderZoom, &QSlider::valueChanged, this, [this](int v) {
             m_zoom = v / 100.0f;
@@ -473,8 +549,8 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         dialOut->setStyleSheet(kDialStyle);
         dialOut->setEnabled(false);
 
-        sbOut = new QSpinBox(grp);
-        sbOut->setRange(lo, hi);
+        sbOut = new NoScrollSpinBox(grp);
+        sbOut->setRange(-99999, 99999);  // unclamped — user can type any value
         sbOut->setValue(0);
         sbOut->setFixedHeight(20);
         sbOut->setStyleSheet(kSpinStyle);
@@ -547,63 +623,81 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         return {content, row};
     };
 
-    // QUANTIZATION
+    // ── QUANTIZATION ─────────────────────────────────────────────────────────
     {
         auto s = makeSection("\u2500\u2500 QUANTIZATION");
         s.l->addWidget(makeKnob("QP \u0394", -51, 51, m_dialQP, m_sbQP, s.w));
         s.l->addStretch(1);
     }
 
-    // TEMPORAL / REFERENCE
+    // ── MOTION & TEMPORAL ────────────────────────────────────────────────────
     {
-        auto s = makeSection("\u2500\u2500 TEMPORAL / REFERENCE");
-        s.l->addWidget(makeKnob("Ref Depth",   0,   7,   m_dialRef,   m_sbRef,   s.w));
-        s.l->addWidget(makeKnob("Ghost Blend", 0, 100,   m_dialGhost, m_sbGhost, s.w));
-        s.l->addWidget(makeKnob("MV\u2192X", -128, 128,  m_dialMVX,   m_sbMVX,   s.w));
-        s.l->addWidget(makeKnob("MV\u2192Y", -128, 128,  m_dialMVY,   m_sbMVY,   s.w));
+        auto s = makeSection("\u2500\u2500 MOTION & TEMPORAL");
+        s.l->addWidget(makeKnob("Ref Depth",    0,   7,   m_dialRef,        m_sbRef,        s.w));
+        s.l->addWidget(makeKnob("Ghost Blend",  0, 100,   m_dialGhost,      m_sbGhost,      s.w));
+        s.l->addWidget(makeKnob("MV\u2192X",  -128, 128,  m_dialMVX,        m_sbMVX,        s.w));
+        s.l->addWidget(makeKnob("MV\u2192Y",  -128, 128,  m_dialMVY,        m_sbMVY,        s.w));
+        s.l->addWidget(makeKnob("MV Amplify",   1,  16,   m_dialMVAmp,      m_sbMVAmp,      s.w));
+        s.l->addWidget(makeKnob("Diff Amp",     0, 200,   m_dialTempDiffAmp,m_sbTempDiffAmp,s.w));
         s.l->addStretch(1);
     }
 
-    // LUMA CORRUPTION
+    // ── LUMA CORRUPTION ──────────────────────────────────────────────────────
     {
         auto s = makeSection("\u2500\u2500 LUMA CORRUPTION");
-        s.l->addWidget(makeKnob("Noise",      0,  255,  m_dialNoise,  m_sbNoise,  s.w));
-        s.l->addWidget(makeKnob("Px Offset", -128, 127, m_dialPxOff,  m_sbPxOff,  s.w));
-        s.l->addWidget(makeKnob("Invert %",   0,  100,  m_dialInvert, m_sbInvert, s.w));
+        s.l->addWidget(makeKnob("Noise",      0,  255,  m_dialNoise,     m_sbNoise,     s.w));
+        s.l->addWidget(makeKnob("Px Offset", -128, 127, m_dialPxOff,     m_sbPxOff,     s.w));
+        s.l->addWidget(makeKnob("Invert %",   0,  100,  m_dialInvert,    m_sbInvert,    s.w));
+        s.l->addWidget(makeKnob("Posterize",  1,    8,  m_dialPosterize, m_sbPosterize, s.w));
+        s.l->addWidget(makeKnob("Sharpen",  -100, 100,  m_dialSharpen,   m_sbSharpen,   s.w));
         s.l->addStretch(1);
     }
 
-    // CHROMA CORRUPTION
+    // ── CHROMA & COLOUR ──────────────────────────────────────────────────────
     {
-        auto s = makeSection("\u2500\u2500 CHROMA CORRUPTION");
-        s.l->addWidget(makeKnob("Chr\u2192X",  -128, 128, m_dialChrX,   m_sbChrX,   s.w));
-        s.l->addWidget(makeKnob("Chr\u2192Y",  -128, 128, m_dialChrY,   m_sbChrY,   s.w));
-        s.l->addWidget(makeKnob("Chr Offset",  -128, 127, m_dialChrOff, m_sbChrOff, s.w));
+        auto s = makeSection("\u2500\u2500 CHROMA & COLOUR");
+        s.l->addWidget(makeKnob("Chr\u2192X",  -128, 128, m_dialChrX,       m_sbChrX,       s.w));
+        s.l->addWidget(makeKnob("Chr\u2192Y",  -128, 128, m_dialChrY,       m_sbChrY,       s.w));
+        s.l->addWidget(makeKnob("Chr Offset",  -128, 127, m_dialChrOff,     m_sbChrOff,     s.w));
+        s.l->addWidget(makeKnob("Twist U",    -127, 127,  m_dialColorTwistU,m_sbColorTwistU,s.w));
+        s.l->addWidget(makeKnob("Twist V",    -127, 127,  m_dialColorTwistV,m_sbColorTwistV,s.w));
+        s.l->addWidget(makeKnob("Hue Rotate",    0, 359,  m_dialHueRotate,  m_sbHueRotate,  s.w));
         s.l->addStretch(1);
     }
 
-    // SPATIAL INFLUENCE
+    // ── SPATIAL & PIXEL ──────────────────────────────────────────────────────
     {
-        auto s = makeSection("\u2500\u2500 SPATIAL INFLUENCE");
-        s.l->addWidget(makeKnob("Spill Out", 0, 8, m_dialSpill,        m_sbSpill,        s.w));
-        s.l->addWidget(makeKnob("Sample In", 0, 8, m_dialSampleRadius, m_sbSampleRadius, s.w));
-        s.l->addStretch(1);
-    }
-
-    // MV AMPLIFY
-    {
-        auto s = makeSection("\u2500\u2500 MV AMPLIFY");
-        s.l->addWidget(makeKnob("MV Amplify", 1, 16, m_dialMVAmp, m_sbMVAmp, s.w));
-        s.l->addStretch(1);
-    }
-
-    // PIXEL MANIPULATION
-    {
-        auto s = makeSection("\u2500\u2500 PIXEL MANIPULATION");
+        auto s = makeSection("\u2500\u2500 SPATIAL & PIXEL");
+        s.l->addWidget(makeKnob("Spill Out",   0,   8,  m_dialSpill,        m_sbSpill,        s.w));
+        s.l->addWidget(makeKnob("Sample In",   0,   8,  m_dialSampleRadius, m_sbSampleRadius, s.w));
         s.l->addWidget(makeKnob("Flatten %",   0, 100,  m_dialBlockFlatten, m_sbBlockFlatten, s.w));
         s.l->addWidget(makeKnob("Scatter px",  0,  32,  m_dialRefScatter,   m_sbRefScatter,   s.w));
-        s.l->addWidget(makeKnob("Twist U",   -127, 127, m_dialColorTwistU,  m_sbColorTwistU,  s.w));
-        s.l->addWidget(makeKnob("Twist V",   -127, 127, m_dialColorTwistV,  m_sbColorTwistV,  s.w));
+        s.l->addWidget(makeKnob("Shuffle px",  0,  32,  m_dialPixelShuffle, m_sbPixelShuffle, s.w));
+        s.l->addStretch(1);
+    }
+
+    // ── BITSTREAM SURGERY — MOTION ───────────────────────────────────────────
+    {
+        auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 MOTION");
+        s.l->addWidget(makeKnob("MVD\u2192X",  -128, 128, m_dialBsMvdX,      m_sbBsMvdX,      s.w));
+        s.l->addWidget(makeKnob("MVD\u2192Y",  -128, 128, m_dialBsMvdY,      m_sbBsMvdY,      s.w));
+        s.l->addWidget(makeKnob("Force Skip",     0, 100, m_dialBsForceSkip, m_sbBsForceSkip, s.w));
+        s.l->addStretch(1);
+    }
+
+    // ── BITSTREAM SURGERY — PREDICTION ───────────────────────────────────────
+    {
+        auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 PREDICTION");
+        s.l->addWidget(makeKnob("Intra Mode",  -1,  3,  m_dialBsIntraMode, m_sbBsIntraMode, s.w));
+        s.l->addWidget(makeKnob("MB Type",     -1,  4,  m_dialBsMbType,    m_sbBsMbType,    s.w));
+        s.l->addStretch(1);
+    }
+
+    // ── BITSTREAM SURGERY — RESIDUAL ─────────────────────────────────────────
+    {
+        auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 RESIDUAL");
+        s.l->addWidget(makeKnob("DCT Scale",   0, 200,  m_dialBsDctScale,  m_sbBsDctScale,  s.w));
+        s.l->addWidget(makeKnob("CBP Zero",    0, 100,  m_dialBsCbpZero,   m_sbBsCbpZero,   s.w));
         s.l->addStretch(1);
     }
 
@@ -679,7 +773,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         makeSliderRow("Decay",   0, 100, m_sliderTransDecay, m_lblTransDecay,
                       "%",       transContent);
 
-        controlsLayout->addWidget(transPanel);
+        m_controlsLayout->addWidget(transPanel);
     }
 
     auto* scrollArea = new QScrollArea(this);
@@ -693,7 +787,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         "QScrollBar:vertical { background:#1a1a1a; width:8px; border:none; }"
         "QScrollBar::handle:vertical { background:#444; border-radius:4px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }");
-    controlsLayout->addWidget(scrollArea);
+    m_controlsLayout->addWidget(scrollArea);
 
     // ── Connect all knobs (dial + spinbox) to m_edits via member pointer ────────
     // Both dial AND spinbox trigger the same field update; the sync lambdas inside
@@ -740,6 +834,20 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     connectKnobs(m_dialRefScatter,   m_sbRefScatter,   &FrameMBParams::refScatter,   "Ref Scatter");
     connectKnobs(m_dialColorTwistU,  m_sbColorTwistU,  &FrameMBParams::colorTwistU,  "Color Twist U");
     connectKnobs(m_dialColorTwistV,  m_sbColorTwistV,  &FrameMBParams::colorTwistV,  "Color Twist V");
+    // New pixel-domain knobs
+    connectKnobs(m_dialPosterize,    m_sbPosterize,    &FrameMBParams::posterize,    "Posterize");
+    connectKnobs(m_dialPixelShuffle, m_sbPixelShuffle, &FrameMBParams::pixelShuffle, "Pixel Shuffle");
+    connectKnobs(m_dialSharpen,      m_sbSharpen,      &FrameMBParams::sharpen,      "Sharpen");
+    connectKnobs(m_dialTempDiffAmp,  m_sbTempDiffAmp,  &FrameMBParams::tempDiffAmp,  "Temp Diff Amp");
+    connectKnobs(m_dialHueRotate,    m_sbHueRotate,    &FrameMBParams::hueRotate,    "Hue Rotate");
+    // Bitstream-domain knobs
+    connectKnobs(m_dialBsMvdX,       m_sbBsMvdX,       &FrameMBParams::bsMvdX,       "BS MVD X");
+    connectKnobs(m_dialBsMvdY,       m_sbBsMvdY,       &FrameMBParams::bsMvdY,       "BS MVD Y");
+    connectKnobs(m_dialBsForceSkip,  m_sbBsForceSkip,  &FrameMBParams::bsForceSkip,  "BS Force Skip");
+    connectKnobs(m_dialBsIntraMode,  m_sbBsIntraMode,  &FrameMBParams::bsIntraMode,  "BS Intra Mode");
+    connectKnobs(m_dialBsMbType,     m_sbBsMbType,     &FrameMBParams::bsMbType,     "BS MB Type");
+    connectKnobs(m_dialBsDctScale,   m_sbBsDctScale,   &FrameMBParams::bsDctScale,   "BS DCT Scale");
+    connectKnobs(m_dialBsCbpZero,    m_sbBsCbpZero,    &FrameMBParams::bsCbpZero,    "BS CBP Zero");
 
     // ── Transient slider connections ──────────────────────────────────────────
     // Cascade controls are seed-specific envelope params — they must NOT
@@ -757,14 +865,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         int oldVal = m_edits[m_currentFrame].cascadeDecay;
         m_edits[m_currentFrame].cascadeDecay = v;
         ControlLogger::instance().logKnobChange("Cascade Decay", m_currentFrame, oldVal, v);
-        // Show the shape description
-        QString desc;
-        if      (v == 0)   desc = "0% (flat)";
-        else if (v < 25)   desc = QString::number(v) + "% (gentle)";
-        else if (v < 60)   desc = QString::number(v) + "% (medium)";
-        else if (v < 90)   desc = QString::number(v) + "% (sharp)";
-        else               desc = QString::number(v) + "% (fast)";
-        m_lblTransDecay->setText(desc);
+        m_lblTransDecay->setText(QString::number(v) + "%");
     });
 
     // ── Brush size + Clear controls ────────────────────────────────────────────
@@ -789,17 +890,18 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         { "Chroma Ghost",          0,  1,  40,   0,   0,  1,   0,  0,   0,  35, -20,  15,  0,  0, 25, 40,  0,  0,  0,  0 },
         { "Pixel Melt",           51,  0,   0,   0,   0,  1, 180, 40,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
         { "Full Freeze",          51,  1, 100,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
-        { "Scatter Wave",          0,  1,   0,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
+        { "Scatter Wave",          0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
         { "UV Colour Twist",       0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 20, 45,  0,  0, 40, 40 },
         { "Vortex",               20,  1,  50,  30, -30,  4,  60, 20,   0,   0,   0,   0,  3,  0, 35, 55,  0,  0,  0,  0 },
     };
 
+    static constexpr int kMBBuiltinCount = (int)(sizeof(kPresets)/sizeof(kPresets[0]));
+
     auto* presetLabel = new QLabel("Preset:", this);
     presetLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
-    auto* presetCombo = new QComboBox(this);
-    presetCombo->addItem("— choose preset —");
-    for (const auto& pr : kPresets) presetCombo->addItem(pr.name);
-    presetCombo->setStyleSheet(
+    m_presetCombo = new QComboBox(this);
+    for (const auto& pr : kPresets) m_presetCombo->addItem(pr.name);
+    m_presetCombo->setStyleSheet(
         "QComboBox { background:#1a1a1a; color:#ff88ff; border:1px solid #663366; "
         "font:8pt 'Consolas'; padding:1px 4px; }"
         "QComboBox::drop-down { border:none; }"
@@ -809,70 +911,99 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     auto* presetRow = new QHBoxLayout;
     presetRow->setSpacing(6);
     presetRow->addWidget(presetLabel);
-    presetRow->addWidget(presetCombo, 1);
-    controlsLayout->addLayout(presetRow);
+    presetRow->addWidget(m_presetCombo, 1);
+    m_controlsLayout->addLayout(presetRow);
 
-    connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this, presetCombo](int idx) {
-        if (idx <= 0) return;
-        static const PresetData kP[] = {
-            {nullptr,  0,  1,  80,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 40, 50,  0,  0,  0,  0 },
-            {nullptr,  0,  1,   0,  60,   0,  3,   0,  0,   0,   0,   0,   0,  2,  0, 20, 30,  0,  0,  0,  0 },
-            {nullptr,  0,  1,  40,   0,   0,  1,   0,  0,   0,  35, -20,  15,  0,  0, 25, 40,  0,  0,  0,  0 },
-            {nullptr, 51,  0,   0,   0,   0,  1, 180, 40,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
-            {nullptr, 51,  1, 100,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
-            {nullptr,  0,  1,   0,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
-            {nullptr,  0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 20, 45,  0,  0, 40, 40 },
-            {nullptr, 20,  1,  50,  30, -30,  4,  60, 20,   0,   0,   0,   0,  3,  0, 35, 55,  0,  0,  0,  0 },
-        };
-        const int pi = idx - 1;
-        if (pi < 0 || pi >= (int)(sizeof(kP)/sizeof(kP[0]))) return;
-        const PresetData& pr = kP[pi];
+    // Preset management buttons
+    {
+        m_btnUserPresetSave   = new QPushButton("Save", this);
+        m_btnUserPresetDel    = new QPushButton("Del",  this);
+        m_btnUserPresetImport = new QPushButton("Import", this);
 
-        for (QDial*    d : m_allDials)     d->blockSignals(true);
-        for (QSpinBox* s : m_allSpinboxes) s->blockSignals(true);
+        const QString btnSS =
+            "QPushButton { background:#1a1a1a; color:#aaa; border:1px solid #444; "
+            "font:7pt 'Consolas'; padding:2px 5px; border-radius:2px; }"
+            "QPushButton:hover { background:#222; color:#fff; border-color:#666; }"
+            "QPushButton:disabled { color:#333; border-color:#222; }";
+        m_btnUserPresetSave  ->setStyleSheet(btnSS);
+        m_btnUserPresetDel   ->setStyleSheet(btnSS);
+        m_btnUserPresetImport->setStyleSheet(btnSS);
 
-        const QVector<int>& range = m_activeRange.isEmpty()
-                                    ? QVector<int>{m_currentFrame}
-                                    : m_activeRange;
-        for (int fi : range) {
-            FrameMBParams& ep = m_edits[fi];
-            ep.qpDelta      = pr.qpDelta;
-            ep.refDepth     = pr.refDepth;
-            ep.ghostBlend   = pr.ghostBlend;
-            ep.mvDriftX     = pr.mvDriftX;
-            ep.mvDriftY     = pr.mvDriftY;
-            ep.mvAmplify    = pr.mvAmplify;
-            ep.noiseLevel   = pr.noiseLevel;
-            ep.pixelOffset  = pr.pixelOffset;
-            ep.invertLuma   = pr.invertLuma;
-            ep.chromaDriftX = pr.chromaDriftX;
-            ep.chromaDriftY = pr.chromaDriftY;
-            ep.chromaOffset = pr.chromaOffset;
-            ep.spillRadius  = pr.spillRadius;
-            ep.sampleRadius = pr.sampleRadius;
-            ep.cascadeLen   = pr.cascadeLen;
-            ep.cascadeDecay = pr.cascadeDecay;
-            ep.blockFlatten = pr.blockFlatten;
-            ep.refScatter   = pr.refScatter;
-            ep.colorTwistU  = pr.colorTwistU;
-            ep.colorTwistV  = pr.colorTwistV;
+        auto* btnRow = new QHBoxLayout;
+        btnRow->setSpacing(4);
+        btnRow->addWidget(m_btnUserPresetSave);
+        btnRow->addWidget(m_btnUserPresetDel);
+        btnRow->addWidget(m_btnUserPresetImport);
+        btnRow->addStretch();
+        m_controlsLayout->addLayout(btnRow);
+
+        refreshUserPresets();
+
+        connect(m_btnUserPresetSave,   &QPushButton::clicked, this, &MacroblockWidget::onUserPresetSave);
+        connect(m_btnUserPresetDel,    &QPushButton::clicked, this, &MacroblockWidget::onUserPresetDelete);
+        connect(m_btnUserPresetImport, &QPushButton::clicked, this, &MacroblockWidget::onUserPresetImport);
+    }
+
+    connect(m_presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (idx < 0) return;
+
+        if (idx < kMBBuiltinCount) {
+            // Built-in preset — convert PresetData to FrameMBParams
+            static const PresetData kP[] = {
+                {nullptr,  0,  1,  80,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 40, 50,  0,  0,  0,  0 },
+                {nullptr,  0,  1,   0,  60,   0,  3,   0,  0,   0,   0,   0,   0,  2,  0, 20, 30,  0,  0,  0,  0 },
+                {nullptr,  0,  1,  40,   0,   0,  1,   0,  0,   0,  35, -20,  15,  0,  0, 25, 40,  0,  0,  0,  0 },
+                {nullptr, 51,  0,   0,   0,   0,  1, 180, 40,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+                {nullptr, 51,  1, 100,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0,  0,  0,  0,  0,  0,  0 },
+                {nullptr,  0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0, 20, 30, 60,  0, 30,  0,  0 },
+                {nullptr,  0,  1,  30,   0,   0,  1,   0,  0,   0,   0,   0,   0,  0,  0, 20, 45,  0,  0, 40, 40 },
+                {nullptr, 20,  1,  50,  30, -30,  4,  60, 20,   0,   0,   0,   0,  3,  0, 35, 55,  0,  0,  0,  0 },
+            };
+            const PresetData& pr = kP[idx];
+            FrameMBParams p;
+            p.qpDelta      = pr.qpDelta;
+            p.refDepth     = pr.refDepth;
+            p.ghostBlend   = pr.ghostBlend;
+            p.mvDriftX     = pr.mvDriftX;
+            p.mvDriftY     = pr.mvDriftY;
+            p.mvAmplify    = pr.mvAmplify;
+            p.noiseLevel   = pr.noiseLevel;
+            p.pixelOffset  = pr.pixelOffset;
+            p.invertLuma   = pr.invertLuma;
+            p.chromaDriftX = pr.chromaDriftX;
+            p.chromaDriftY = pr.chromaDriftY;
+            p.chromaOffset = pr.chromaOffset;
+            p.spillRadius  = pr.spillRadius;
+            p.sampleRadius = pr.sampleRadius;
+            p.cascadeLen   = pr.cascadeLen;
+            p.cascadeDecay = pr.cascadeDecay;
+            p.blockFlatten = pr.blockFlatten;
+            p.refScatter   = pr.refScatter;
+            p.colorTwistU  = pr.colorTwistU;
+            p.colorTwistV  = pr.colorTwistV;
+            applyControlParams(p);
+        } else if (idx > kMBBuiltinCount) {
+            // User preset (kMBBuiltinCount is the separator)
+            const QString name = m_presetCombo->itemText(idx);
+            if (name.isEmpty()) return;
+            FrameMBParams p;
+            if (PresetManager::loadMBEditor(name, p))
+                applyControlParams(p);
         }
 
-        for (QDial*    d : m_allDials)     d->blockSignals(false);
-        for (QSpinBox* s : m_allSpinboxes) s->blockSignals(false);
-
-        loadKnobsFromCurrentFrame();
-
-        QSignalBlocker sb(presetCombo);
-        presetCombo->setCurrentIndex(0);
+        if (m_btnUserPresetDel)
+            m_btnUserPresetDel->setEnabled(idx > kMBBuiltinCount);
     });
 
-    // ── Brush / clear row ─────────────────────────────────────────────────────
-    auto* ctrlRow = new QHBoxLayout;
+    // ── Brush / clear row (wrapped in QWidget for pop-out reparenting) ────────
+    m_brushBar = new QWidget(this);
+    m_brushBar->setStyleSheet("background:transparent;");
+    auto* ctrlRow = new QHBoxLayout(m_brushBar);
+    ctrlRow->setContentsMargins(0, 0, 0, 0);
     ctrlRow->setSpacing(6);
 
-    auto* brushLabel = new QLabel("Brush:", this);
+    auto* brushLabel = new QLabel("Brush:", m_brushBar);
     brushLabel->setStyleSheet("color:#888; font:7pt 'Consolas';");
     brushLabel->setFixedWidth(38);
     ctrlRow->addWidget(brushLabel);
@@ -898,6 +1029,45 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     m_lblBrush->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     ctrlRow->addWidget(m_lblBrush);
 
+    // +/- brush mode toggle (select vs deselect)
+    m_btnBrushAdd = new QPushButton("+", this);
+    m_btnBrushSub = new QPushButton("\xe2\x80\x93", this);  // en-dash for minus
+    m_btnBrushAdd->setFixedSize(22, 22);
+    m_btnBrushSub->setFixedSize(22, 22);
+    m_btnBrushAdd->setToolTip("Select mode (paint MBs)");
+    m_btnBrushSub->setToolTip("Deselect mode (erase MBs)\nHold Alt to temporarily toggle");
+    m_btnBrushAdd->setCheckable(true);
+    m_btnBrushSub->setCheckable(true);
+    m_btnBrushAdd->setChecked(true);   // default: select mode
+    m_btnBrushSub->setChecked(false);
+    const QString toggleOnSS =
+        "QPushButton { background:#1a2a1a; color:#00ff88; border:1px solid #00ff88; "
+        "font:bold 9pt 'Consolas'; border-radius:3px; }"
+        "QPushButton:hover { background:#223322; }";
+    const QString toggleOffSS =
+        "QPushButton { background:#1a1a1a; color:#555; border:1px solid #333; "
+        "font:bold 9pt 'Consolas'; border-radius:3px; }"
+        "QPushButton:hover { background:#222; color:#aaa; }";
+    m_btnBrushAdd->setStyleSheet(toggleOnSS);
+    m_btnBrushSub->setStyleSheet(toggleOffSS);
+    ctrlRow->addWidget(m_btnBrushAdd);
+    ctrlRow->addWidget(m_btnBrushSub);
+
+    connect(m_btnBrushAdd, &QPushButton::clicked, this, [this, toggleOnSS, toggleOffSS]() {
+        m_canvas->setDeselectMode(false);
+        m_btnBrushAdd->setChecked(true);
+        m_btnBrushSub->setChecked(false);
+        m_btnBrushAdd->setStyleSheet(toggleOnSS);
+        m_btnBrushSub->setStyleSheet(toggleOffSS);
+    });
+    connect(m_btnBrushSub, &QPushButton::clicked, this, [this, toggleOnSS, toggleOffSS]() {
+        m_canvas->setDeselectMode(true);
+        m_btnBrushAdd->setChecked(false);
+        m_btnBrushSub->setChecked(true);
+        m_btnBrushSub->setStyleSheet(toggleOnSS);
+        m_btnBrushAdd->setStyleSheet(toggleOffSS);
+    });
+
     ctrlRow->addStretch(1);
 
     m_btnClearFrame = new QPushButton("Clear Frame", this);
@@ -909,7 +1079,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
 
     ctrlRow->addWidget(m_btnClearFrame);
     ctrlRow->addWidget(m_btnClearAll);
-    controlsLayout->addLayout(ctrlRow);
+    m_controlsLayout->addWidget(m_brushBar);
 
     connect(m_sliderBrush, &QSlider::valueChanged, m_canvas, &MBCanvas::setBrushSize);
     connect(m_sliderBrush, &QSlider::valueChanged, this, [this](int v) {
@@ -1111,22 +1281,27 @@ void MacroblockWidget::loadKnobsFromCurrentFrame()
     m_sliderTransLen->setValue(p.cascadeLen);
     m_sliderTransDecay->setValue(p.cascadeDecay);
     m_lblTransLen->setText(QString::number(p.cascadeLen) + " frames");
-    {
-        int v = p.cascadeDecay;
-        QString desc;
-        if      (v == 0) desc = "0% (flat)";
-        else if (v < 25) desc = QString::number(v) + "% (gentle)";
-        else if (v < 60) desc = QString::number(v) + "% (medium)";
-        else if (v < 90) desc = QString::number(v) + "% (sharp)";
-        else             desc = QString::number(v) + "% (fast)";
-        m_lblTransDecay->setText(desc);
-    }
+    m_lblTransDecay->setText(QString::number(p.cascadeDecay) + "%");
     m_sliderTransLen->blockSignals(false);
     m_sliderTransDecay->blockSignals(false);
     setKnob(m_dialBlockFlatten, m_sbBlockFlatten, p.blockFlatten);
     setKnob(m_dialRefScatter,   m_sbRefScatter,   p.refScatter);
     setKnob(m_dialColorTwistU,  m_sbColorTwistU,  p.colorTwistU);
     setKnob(m_dialColorTwistV,  m_sbColorTwistV,  p.colorTwistV);
+    // New pixel-domain
+    setKnob(m_dialPosterize,    m_sbPosterize,    p.posterize);
+    setKnob(m_dialPixelShuffle, m_sbPixelShuffle, p.pixelShuffle);
+    setKnob(m_dialSharpen,      m_sbSharpen,      p.sharpen);
+    setKnob(m_dialTempDiffAmp,  m_sbTempDiffAmp,  p.tempDiffAmp);
+    setKnob(m_dialHueRotate,    m_sbHueRotate,    p.hueRotate);
+    // Bitstream-domain
+    setKnob(m_dialBsMvdX,       m_sbBsMvdX,       p.bsMvdX);
+    setKnob(m_dialBsMvdY,       m_sbBsMvdY,       p.bsMvdY);
+    setKnob(m_dialBsForceSkip,  m_sbBsForceSkip,  p.bsForceSkip);
+    setKnob(m_dialBsIntraMode,  m_sbBsIntraMode,  p.bsIntraMode);
+    setKnob(m_dialBsMbType,     m_sbBsMbType,     p.bsMbType);
+    setKnob(m_dialBsDctScale,   m_sbBsDctScale,   p.bsDctScale);
+    setKnob(m_dialBsCbpZero,    m_sbBsCbpZero,    p.bsCbpZero);
 
     for (QDial*    d : m_allDials)     d->blockSignals(false);
     for (QSpinBox* s : m_allSpinboxes) s->blockSignals(false);
@@ -1231,16 +1406,175 @@ bool MacroblockWidget::eventFilter(QObject* obj, QEvent* e)
         return true; // consume — do not scroll the viewport
     }
     // ── Pop-out window closed: re-dock canvas into splitter ───────────────────
-    if (obj == m_canvasScroll && e->type() == QEvent::Close) {
+    if (obj == m_popOutWindow && e->type() == QEvent::Close) {
+        m_controlsLayout->insertWidget(0, m_navBar);
+        m_navBar->show();
         m_innerSplitter->insertWidget(0, m_canvasScroll);
         m_canvasScroll->show();
+        m_controlsLayout->addWidget(m_brushBar);
+        m_brushBar->show();
+        m_popOutWindow->deleteLater();
+        m_popOutWindow = nullptr;
         if (m_btnPopOutCanvas) {
             m_btnPopOutCanvas->setText("\u2922");
         }
         m_canvasIsPopped = false;
-        return true; // suppress the close; widget is now re-docked
+        return true; // suppress the close; widgets are now re-docked
     }
     return QWidget::eventFilter(obj, e);
+}
+
+// =============================================================================
+// User preset API
+// =============================================================================
+
+FrameMBParams MacroblockWidget::currentControlParams() const
+{
+    return m_edits.value(m_currentFrame);
+    // Note: the returned struct includes selectedMBs from the current frame.
+    // Callers that want only knob values should ignore selectedMBs.
+}
+
+void MacroblockWidget::applyControlParams(const FrameMBParams& p)
+{
+    const QVector<int>& range = m_activeRange.isEmpty()
+                                ? QVector<int>{m_currentFrame}
+                                : m_activeRange;
+
+    for (QDial*    d : m_allDials)     d->blockSignals(true);
+    for (QSpinBox* s : m_allSpinboxes) s->blockSignals(true);
+
+    for (int fi : range) {
+        FrameMBParams& ep = m_edits[fi];
+        // Preserve the selection on each frame; apply only the control values.
+        ep.qpDelta      = p.qpDelta;
+        ep.mvDriftX     = p.mvDriftX;
+        ep.mvDriftY     = p.mvDriftY;
+        ep.refDepth     = p.refDepth;
+        ep.ghostBlend   = p.ghostBlend;
+        ep.noiseLevel   = p.noiseLevel;
+        ep.pixelOffset  = p.pixelOffset;
+        ep.invertLuma   = p.invertLuma;
+        ep.chromaDriftX = p.chromaDriftX;
+        ep.chromaDriftY = p.chromaDriftY;
+        ep.chromaOffset = p.chromaOffset;
+        ep.spillRadius  = p.spillRadius;
+        ep.sampleRadius = p.sampleRadius;
+        ep.mvAmplify    = p.mvAmplify;
+        ep.cascadeLen   = p.cascadeLen;
+        ep.cascadeDecay = p.cascadeDecay;
+        ep.blockFlatten = p.blockFlatten;
+        ep.refScatter   = p.refScatter;
+        ep.colorTwistU  = p.colorTwistU;
+        ep.colorTwistV  = p.colorTwistV;
+        // New pixel-domain
+        ep.posterize    = p.posterize;
+        ep.pixelShuffle = p.pixelShuffle;
+        ep.sharpen      = p.sharpen;
+        ep.tempDiffAmp  = p.tempDiffAmp;
+        ep.hueRotate    = p.hueRotate;
+        // Bitstream-domain
+        ep.bsMvdX       = p.bsMvdX;
+        ep.bsMvdY       = p.bsMvdY;
+        ep.bsForceSkip  = p.bsForceSkip;
+        ep.bsIntraMode  = p.bsIntraMode;
+        ep.bsMbType     = p.bsMbType;
+        ep.bsDctScale   = p.bsDctScale;
+        ep.bsCbpZero    = p.bsCbpZero;
+    }
+
+    for (QDial*    d : m_allDials)     d->blockSignals(false);
+    for (QSpinBox* s : m_allSpinboxes) s->blockSignals(false);
+
+    loadKnobsFromCurrentFrame();
+}
+
+static constexpr int kMBBuiltinCountStatic = 8; // must match kMBBuiltinCount in ctor
+
+void MacroblockWidget::refreshUserPresets()
+{
+    if (!m_presetCombo) return;
+    QSignalBlocker sb(m_presetCombo);
+
+    // Remove everything after built-in items (separator + old user items)
+    while (m_presetCombo->count() > kMBBuiltinCountStatic)
+        m_presetCombo->removeItem(m_presetCombo->count() - 1);
+
+    const QStringList names = PresetManager::list(PresetManager::Type::MBEditor);
+    if (!names.isEmpty()) {
+        m_presetCombo->insertSeparator(kMBBuiltinCountStatic);
+        for (const QString& n : names)
+            m_presetCombo->addItem(n);
+    }
+
+    if (m_btnUserPresetDel)
+        m_btnUserPresetDel->setEnabled(!names.isEmpty() &&
+            m_presetCombo->currentIndex() > kMBBuiltinCountStatic);
+}
+
+// ── Preset slots ──────────────────────────────────────────────────────────────
+
+void MacroblockWidget::onUserPresetSave()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this,
+        "Save MB Editor Preset",
+        "Preset name:",
+        QLineEdit::Normal,
+        QString(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    FrameMBParams p = currentControlParams();
+    if (!PresetManager::saveMBEditor(name, p)) {
+        QMessageBox::warning(this, "Save Failed",
+            QString("Could not save preset \"%1\".").arg(name));
+        return;
+    }
+    refreshUserPresets();
+    const int idx = m_presetCombo->findText(PresetManager::sanitize(name));
+    if (idx >= 0) m_presetCombo->setCurrentIndex(idx);
+}
+
+void MacroblockWidget::onUserPresetDelete()
+{
+    const int ci = m_presetCombo->currentIndex();
+    if (ci <= kMBBuiltinCountStatic) return; // can't delete built-in or separator
+
+    const QString name = m_presetCombo->currentText();
+    if (name.isEmpty()) return;
+
+    const auto btn = QMessageBox::question(this, "Delete Preset",
+        QString("Delete preset \"%1\"?").arg(name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (btn != QMessageBox::Yes) return;
+
+    PresetManager::deletePreset(PresetManager::Type::MBEditor, name);
+    refreshUserPresets();
+}
+
+void MacroblockWidget::onUserPresetImport()
+{
+    const QString src = QFileDialog::getOpenFileName(this,
+        "Import MB Editor Preset", QString(),
+        "JSON Preset Files (*.json);;All Files (*)");
+    if (src.isEmpty()) return;
+
+    bool ok = false;
+    const QString name = QInputDialog::getText(this,
+        "Import Preset",
+        "Name for imported preset:",
+        QLineEdit::Normal,
+        QFileInfo(src).completeBaseName(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    if (!PresetManager::importFile(PresetManager::Type::MBEditor, src, name)) {
+        QMessageBox::warning(this, "Import Failed",
+            "The selected file does not appear to be an MB editor preset.");
+        return;
+    }
+    refreshUserPresets();
+    const int idx = m_presetCombo->findText(PresetManager::sanitize(name));
+    if (idx >= 0) m_presetCombo->setCurrentIndex(idx);
 }
 
 #include "MacroblockWidget.moc"

@@ -2,6 +2,7 @@
 #include "ToggleSwitch.h"
 
 #include "core/logger/ControlLogger.h"
+#include "core/presets/PresetManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -13,6 +14,10 @@
 #include <QDoubleSpinBox>
 #include <QPushButton>
 #include <QFrame>
+#include <QInputDialog>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
 
 // =============================================================================
 // Style constants — updated dark theme (white / neon-green text)
@@ -180,8 +185,30 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         hdr->addWidget(m_presetCombo);
         root->addLayout(hdr);
 
+        // Preset management buttons
+        auto* presetBtnRow = new QHBoxLayout;
+        presetBtnRow->setSpacing(4);
+        presetBtnRow->addStretch();
+
+        m_btnUserPresetSave   = new QPushButton("Save",   this);
+        m_btnUserPresetDel    = new QPushButton("Del",    this);
+        m_btnUserPresetImport = new QPushButton("Import", this);
+
+        for (QPushButton* b : {m_btnUserPresetSave, m_btnUserPresetDel, m_btnUserPresetImport})
+            b->setStyleSheet(kBtn);
+
+        presetBtnRow->addWidget(m_btnUserPresetSave);
+        presetBtnRow->addWidget(m_btnUserPresetDel);
+        presetBtnRow->addWidget(m_btnUserPresetImport);
+        root->addLayout(presetBtnRow);
+
+        refreshUserPresets();
+
         connect(m_presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &GlobalParamsWidget::onPresetSelected);
+        connect(m_btnUserPresetSave,   &QPushButton::clicked, this, &GlobalParamsWidget::onUserPresetSave);
+        connect(m_btnUserPresetDel,    &QPushButton::clicked, this, &GlobalParamsWidget::onUserPresetDelete);
+        connect(m_btnUserPresetImport, &QPushButton::clicked, this, &GlobalParamsWidget::onUserPresetImport);
     }
 
     // ── Kill I-Frames — prominent top-level toggle ───────────────────────────
@@ -195,6 +222,19 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
             "cannot use intra prediction anywhere except the first frame.\n"
             "Essential for classic datamoshing — combine with 'Infinite GOP' preset.");
         root->addWidget(m_cbKillIFrames);
+    }
+
+    // ── Scene-cut detection toggle ──────────────────────────────────────────
+    {
+        m_cbScenecut = new ToggleSwitch(
+            "Scene-Cut Detection  (auto I-frames at scene transitions)", this);
+        m_cbScenecut->setChecked(false);
+        m_cbScenecut->setOnColor(QColor(0x44, 0x88, 0xff)); // blue accent
+        m_cbScenecut->setToolTip(
+            "When ON, x264 detects scene transitions and automatically inserts\n"
+            "I-frames at cuts. OFF by default to prevent surprise I-frames\n"
+            "during datamoshing.");
+        root->addWidget(m_cbScenecut);
     }
 
     // ── Control Debug Logging toggle ─────────────────────────────────────────
@@ -329,6 +369,41 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         m_sbLookahead    = addSpin(g, 2, 1, "Lookahead (-1=dflt)",  -1, 250, -1, paramContainer);
     }
 
+    // ── RATE-CONTROL FIDELITY ────────────────────────────────────────────────
+    // These parameters inhibit x264's ability to override per-MB user edits.
+    // Each control is gated by a toggle — OFF = x264 uses its own default.
+    {
+        auto* g = addSection("\u2500\u2500 RATE-CONTROL FIDELITY");
+
+        // Helper: create a toggle + control pair where the control is disabled until toggled on.
+        auto addGatedDSpin = [&](QGridLayout* grid, int row, int col,
+                                  const QString& lbl, double lo, double hi,
+                                  double defVal, double step,
+                                  ToggleSwitch*& toggleOut, QDoubleSpinBox*& sbOut) {
+            toggleOut = addToggle(grid, row, col, lbl, false, paramContainer);
+            sbOut = addDSpin(grid, row, col == 0 ? 1 : col, "", lo, hi, defVal, step, paramContainer);
+            // Replace the empty label that addDSpin created
+            sbOut->setEnabled(false);
+            connect(toggleOut, &QAbstractButton::toggled, sbOut, &QWidget::setEnabled);
+        };
+
+        auto addGatedSpin = [&](QGridLayout* grid, int row, int col,
+                                 const QString& lbl, int lo, int hi, int defVal,
+                                 ToggleSwitch*& toggleOut, QSpinBox*& sbOut) {
+            toggleOut = addToggle(grid, row, col, lbl, false, paramContainer);
+            sbOut = addSpin(grid, row, col == 0 ? 1 : col, "", lo, hi, defVal, paramContainer);
+            sbOut->setEnabled(false);
+            connect(toggleOut, &QAbstractButton::toggled, sbOut, &QWidget::setEnabled);
+        };
+
+        addGatedDSpin(g, 0, 0, "QP Comp",        0.0, 1.0, 0.6, 0.05, m_cbQcompEnable,    m_dsbQcomp);
+        addGatedDSpin(g, 0, 1, "I/P Ratio",      1.0, 2.0, 1.4, 0.1,  m_cbIpratioEnable,  m_dsbIpratio);
+        addGatedDSpin(g, 1, 0, "P/B Ratio",      1.0, 2.0, 1.3, 0.1,  m_cbPbratioEnable,  m_dsbPbratio);
+        addGatedSpin (g, 1, 1, "DZ Inter",        0,  32,  21,          m_cbDzInterEnable,  m_sbDzInter);
+        addGatedSpin (g, 2, 0, "DZ Intra",        0,  32,  11,          m_cbDzIntraEnable,  m_sbDzIntra);
+        addGatedDSpin(g, 2, 1, "QP Blur",        0.0, 10.0, 0.5, 0.1,  m_cbQblurEnable,    m_dsbQblur);
+    }
+
     // ── SPATIAL MASK ─────────────────────────────────────────────────────────
     {
         auto* g = addSection("\u2500\u2500 SPATIAL MASK (from MB Painter)");
@@ -386,7 +461,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
     root->addWidget(scrollArea, 1);
 
     // ── Apply button ─────────────────────────────────────────────────────────
-    m_btnApply = new QPushButton("Render", this);
+    m_btnApply = new QPushButton("RENDER", this);
     m_btnApply->setStyleSheet(kApplyBtn);
     m_btnApply->setFixedHeight(34);
     m_btnApply->setToolTip(
@@ -403,6 +478,8 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
 // Preset loading
 // =============================================================================
 
+static constexpr int kGPBuiltinCount = 10;
+
 void GlobalParamsWidget::onPresetSelected(int idx)
 {
     static const EncodePreset presets[] = {
@@ -417,8 +494,22 @@ void GlobalParamsWidget::onPresetSelected(int idx)
         EncodePreset::TemporalBleed,
         EncodePreset::DataCorrupt,
     };
-    if (idx < 0 || idx >= (int)(sizeof(presets)/sizeof(presets[0]))) return;
-    setParams(presetParams(presets[idx]));
+    if (idx < 0) return;
+
+    if (idx < kGPBuiltinCount) {
+        // Built-in preset
+        setParams(presetParams(presets[idx]));
+    } else if (idx > kGPBuiltinCount) {
+        // User preset (kGPBuiltinCount is the separator)
+        const QString name = m_presetCombo->itemText(idx);
+        GlobalEncodeParams p;
+        if (PresetManager::loadGlobalEncode(name, p))
+            setParams(p);
+    }
+
+    // Del only works on user presets
+    if (m_btnUserPresetDel)
+        m_btnUserPresetDel->setEnabled(idx > kGPBuiltinCount);
 }
 
 // =============================================================================
@@ -430,6 +521,7 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
     GlobalEncodeParams p;
 
     p.killIFrames = m_cbKillIFrames->isChecked();
+    p.scenecut    = m_cbScenecut->isChecked();
     p.gopSize    = m_sbGopSize->value();
     p.bFrames    = m_sbBFrames->value();
     p.bAdapt     = m_cbBAdapt->currentIndex() - 1;
@@ -466,6 +558,20 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
     p.mbTreeDisable = m_cbMBTreeDisable->isChecked();
     p.rcLookahead   = m_sbLookahead->value();
 
+    // Rate-control fidelity (gated by enable toggles)
+    p.qcompEnabled         = m_cbQcompEnable->isChecked();
+    p.qcomp                = (float)m_dsbQcomp->value();
+    p.ipratioEnabled       = m_cbIpratioEnable->isChecked();
+    p.ipratio              = (float)m_dsbIpratio->value();
+    p.pbratioEnabled       = m_cbPbratioEnable->isChecked();
+    p.pbratio              = (float)m_dsbPbratio->value();
+    p.deadzoneInterEnabled = m_cbDzInterEnable->isChecked();
+    p.deadzoneInter        = m_sbDzInter->value();
+    p.deadzoneIntraEnabled = m_cbDzIntraEnable->isChecked();
+    p.deadzoneIntra        = m_sbDzIntra->value();
+    p.qblurEnabled         = m_cbQblurEnable->isChecked();
+    p.qblur                = (float)m_dsbQblur->value();
+
     p.spatialMaskMBs = m_spatialMask;
     p.spatialMaskQP  = m_sbMaskQP->value();
 
@@ -479,6 +585,7 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
 void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
 {
     m_cbKillIFrames->setChecked(p.killIFrames);
+    m_cbScenecut->setChecked(p.scenecut);
     m_sbGopSize->setValue(p.gopSize);
     m_sbBFrames->setValue(p.bFrames);
     m_cbBAdapt->setCurrentIndex(qBound(0, p.bAdapt + 1, m_cbBAdapt->count() - 1));
@@ -514,6 +621,26 @@ void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
     m_dsbAQStrength->setValue(p.aqStrength);
     m_cbMBTreeDisable->setChecked(p.mbTreeDisable);
     m_sbLookahead->setValue(p.rcLookahead);
+
+    // Rate-control fidelity
+    m_cbQcompEnable->setChecked(p.qcompEnabled);
+    m_dsbQcomp->setValue(p.qcomp);
+    m_dsbQcomp->setEnabled(p.qcompEnabled);
+    m_cbIpratioEnable->setChecked(p.ipratioEnabled);
+    m_dsbIpratio->setValue(p.ipratio);
+    m_dsbIpratio->setEnabled(p.ipratioEnabled);
+    m_cbPbratioEnable->setChecked(p.pbratioEnabled);
+    m_dsbPbratio->setValue(p.pbratio);
+    m_dsbPbratio->setEnabled(p.pbratioEnabled);
+    m_cbDzInterEnable->setChecked(p.deadzoneInterEnabled);
+    m_sbDzInter->setValue(p.deadzoneInter);
+    m_sbDzInter->setEnabled(p.deadzoneInterEnabled);
+    m_cbDzIntraEnable->setChecked(p.deadzoneIntraEnabled);
+    m_sbDzIntra->setValue(p.deadzoneIntra);
+    m_sbDzIntra->setEnabled(p.deadzoneIntraEnabled);
+    m_cbQblurEnable->setChecked(p.qblurEnabled);
+    m_dsbQblur->setValue(p.qblur);
+    m_dsbQblur->setEnabled(p.qblurEnabled);
 }
 
 // =============================================================================
@@ -526,4 +653,91 @@ void GlobalParamsWidget::updateSpatialMask(const QSet<int>& mbs)
     if (!mbs.isEmpty())
         m_maskLabel->setText(
             QString("%1 MBs ready to capture").arg(mbs.size()));
+}
+
+// =============================================================================
+// User preset management
+// =============================================================================
+
+void GlobalParamsWidget::refreshUserPresets()
+{
+    if (!m_presetCombo) return;
+    QSignalBlocker sb(m_presetCombo);
+
+    // Remove everything after built-in items (separator + old user items)
+    while (m_presetCombo->count() > kGPBuiltinCount)
+        m_presetCombo->removeItem(m_presetCombo->count() - 1);
+
+    const QStringList names = PresetManager::list(PresetManager::Type::GlobalEncode);
+    if (!names.isEmpty()) {
+        m_presetCombo->insertSeparator(kGPBuiltinCount);
+        for (const QString& n : names)
+            m_presetCombo->addItem(n);
+    }
+
+    if (m_btnUserPresetDel)
+        m_btnUserPresetDel->setEnabled(!names.isEmpty() &&
+            m_presetCombo->currentIndex() > kGPBuiltinCount);
+}
+
+void GlobalParamsWidget::onUserPresetSave()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this,
+        "Save Global Encode Preset",
+        "Preset name:",
+        QLineEdit::Normal,
+        QString(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    if (!PresetManager::saveGlobalEncode(name, currentParams())) {
+        QMessageBox::warning(this, "Save Failed",
+            QString("Could not save preset \"%1\".").arg(name));
+        return;
+    }
+    refreshUserPresets();
+    const int idx = m_presetCombo->findText(PresetManager::sanitize(name));
+    if (idx >= 0) m_presetCombo->setCurrentIndex(idx);
+}
+
+void GlobalParamsWidget::onUserPresetDelete()
+{
+    const int ci = m_presetCombo->currentIndex();
+    if (ci <= kGPBuiltinCount) return; // can't delete built-in or separator
+
+    const QString name = m_presetCombo->currentText();
+    if (name.isEmpty()) return;
+
+    const auto btn = QMessageBox::question(this, "Delete Preset",
+        QString("Delete preset \"%1\"?").arg(name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (btn != QMessageBox::Yes) return;
+
+    PresetManager::deletePreset(PresetManager::Type::GlobalEncode, name);
+    refreshUserPresets();
+}
+
+void GlobalParamsWidget::onUserPresetImport()
+{
+    const QString src = QFileDialog::getOpenFileName(this,
+        "Import Global Encode Preset", QString(),
+        "JSON Preset Files (*.json);;All Files (*)");
+    if (src.isEmpty()) return;
+
+    bool ok = false;
+    const QString name = QInputDialog::getText(this,
+        "Import Preset",
+        "Name for imported preset:",
+        QLineEdit::Normal,
+        QFileInfo(src).completeBaseName(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    if (!PresetManager::importFile(PresetManager::Type::GlobalEncode, src, name)) {
+        QMessageBox::warning(this, "Import Failed",
+            "The selected file does not appear to be a Global Encode preset.");
+        return;
+    }
+    refreshUserPresets();
+    const int idx = m_presetCombo->findText(PresetManager::sanitize(name));
+    if (idx >= 0) m_presetCombo->setCurrentIndex(idx);
 }

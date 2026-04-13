@@ -188,7 +188,7 @@ int main(int argc, char *argv[])
     app.setFont(defaultFont);
 
     // ── Splash screen ────────────────────────────────────────────────────────
-    QPixmap splashPx(":/assets/png/LA_ICO_5.png");
+    QPixmap splashPx(":/assets/png/LaMoshPit_Launch_Splash.png");
     QSplashScreen* splash = nullptr;
 
     if (!splashPx.isNull()) {

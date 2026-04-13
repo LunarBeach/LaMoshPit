@@ -42,6 +42,7 @@ public slots:
         AVPacket* pkt      = nullptr;
         int vsIdx = -1;
         int frameIdx = 0;
+        int scaledW = 0, scaledH = 0;
 
         if (avformat_open_input(&fmtCtx, m_path.toUtf8().constData(), nullptr, nullptr) < 0)
             goto done;
@@ -65,42 +66,47 @@ public slots:
 
         frame    = av_frame_alloc();
         rgbFrame = av_frame_alloc();
-        {
-            int bufSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, m_thumbW, m_thumbH, 1);
-            rgbBuf = (uint8_t*)av_malloc((size_t)bufSize);
-            av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize,
-                                 rgbBuf, AV_PIX_FMT_RGB24, m_thumbW, m_thumbH, 1);
-        }
-
         pkt = av_packet_alloc();
+
+// Macro: scale decoded frame → aspect-correct padded thumbnail, emit, advance
+#define EMIT_THUMB() do { \
+    if (frame->width && frame->height) { \
+        if (scaledW == 0) { \
+            double scX = (double)m_thumbW / frame->width; \
+            double scY = (double)m_thumbH / frame->height; \
+            double sc  = qMin(scX, scY); \
+            scaledW = qMax(2, (int)(frame->width  * sc)) & ~1; \
+            scaledH = qMax(2, (int)(frame->height * sc)) & ~1; \
+            int bufSz = av_image_get_buffer_size(AV_PIX_FMT_RGB24, scaledW, scaledH, 1); \
+            rgbBuf = (uint8_t*)av_malloc((size_t)bufSz); \
+            av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize, \
+                                 rgbBuf, AV_PIX_FMT_RGB24, scaledW, scaledH, 1); \
+            swsCtx = sws_getContext( \
+                frame->width, frame->height, (AVPixelFormat)frame->format, \
+                scaledW, scaledH, AV_PIX_FMT_RGB24, \
+                SWS_BILINEAR, nullptr, nullptr, nullptr); \
+        } \
+        if (swsCtx) { \
+            sws_scale(swsCtx, frame->data, frame->linesize, 0, frame->height, \
+                      rgbFrame->data, rgbFrame->linesize); \
+            QImage sc(rgbBuf, scaledW, scaledH, rgbFrame->linesize[0], QImage::Format_RGB888); \
+            QImage pad(m_thumbW, m_thumbH, QImage::Format_RGB888); \
+            pad.fill(QColor(0x11, 0x11, 0x11)); \
+            QPainter ptr(&pad); \
+            ptr.drawImage((m_thumbW - scaledW) / 2, (m_thumbH - scaledH) / 2, sc); \
+            ptr.end(); \
+            emit thumbnailReady(frameIdx, QPixmap::fromImage(pad)); \
+        } \
+    } \
+    frameIdx++; \
+    av_frame_unref(frame); \
+} while(0)
 
         while (av_read_frame(fmtCtx, pkt) >= 0) {
             if (pkt->stream_index == vsIdx) {
                 if (avcodec_send_packet(decCtx, pkt) == 0) {
-                    while (avcodec_receive_frame(decCtx, frame) == 0) {
-                        // Recreate sws if format differs (rare)
-                        if (!swsCtx) {
-                            swsCtx = sws_getContext(
-                                frame->width, frame->height,
-                                (AVPixelFormat)frame->format,
-                                m_thumbW, m_thumbH,
-                                AV_PIX_FMT_RGB24,
-                                SWS_BILINEAR, nullptr, nullptr, nullptr);
-                        }
-                        if (swsCtx) {
-                            sws_scale(swsCtx,
-                                      frame->data, frame->linesize, 0, frame->height,
-                                      rgbFrame->data, rgbFrame->linesize);
-
-                            // QImage does NOT copy the buffer — we must copy it
-                            QImage img(rgbBuf, m_thumbW, m_thumbH,
-                                       rgbFrame->linesize[0],
-                                       QImage::Format_RGB888);
-                            emit thumbnailReady(frameIdx, QPixmap::fromImage(img.copy()));
-                        }
-                        frameIdx++;
-                        av_frame_unref(frame);
-                    }
+                    while (avcodec_receive_frame(decCtx, frame) == 0)
+                        EMIT_THUMB();
                 }
             }
             av_packet_unref(pkt);
@@ -108,18 +114,10 @@ public slots:
 
         // Flush decoder
         avcodec_send_packet(decCtx, nullptr);
-        while (avcodec_receive_frame(decCtx, frame) == 0) {
-            if (swsCtx) {
-                sws_scale(swsCtx,
-                          frame->data, frame->linesize, 0, frame->height,
-                          rgbFrame->data, rgbFrame->linesize);
-                QImage img(rgbBuf, m_thumbW, m_thumbH,
-                           rgbFrame->linesize[0], QImage::Format_RGB888);
-                emit thumbnailReady(frameIdx, QPixmap::fromImage(img.copy()));
-            }
-            frameIdx++;
-            av_frame_unref(frame);
-        }
+        while (avcodec_receive_frame(decCtx, frame) == 0)
+            EMIT_THUMB();
+
+#undef EMIT_THUMB
 
     done:
         if (swsCtx)  sws_freeContext(swsCtx);
@@ -233,6 +231,14 @@ void FrameStripWidget::paintEvent(QPaintEvent* e)
 
     for (int i = firstCell; i <= lastCell; i++)
         drawCell(p, i);
+
+    // ── Drag-reorder overlay ──────────────────────────────────────────────
+    if (m_dragActive && m_dropInsertIdx >= 0) {
+        // Vertical drop-indicator line between the target gap.
+        // The left edge of slot i is at i * SLOT_W; the gap sits at GAP/2 before it.
+        const int lineX = m_dropInsertIdx * SLOT_W + GAP / 2 - 1;
+        p.fillRect(lineX, MARGIN_V - 2, 3, CELL_H + 4, QColor(255, 160, 0, 230));
+    }
 }
 
 void FrameStripWidget::drawCell(QPainter& p, int idx) const
@@ -257,7 +263,17 @@ void FrameStripWidget::drawCell(QPainter& p, int idx) const
                  THUMB_W,           THUMB_H);
 
     if (fd.thumbLoaded) {
-        p.drawPixmap(thumbR, fd.thumb);
+        // Preserve aspect ratio: fit the thumbnail inside thumbR, centered
+        p.fillRect(thumbR, QColor(0x11, 0x11, 0x11));
+        const QSize ts = fd.thumb.size();
+        if (!ts.isEmpty()) {
+            const QSize fitted = ts.scaled(thumbR.size(), Qt::KeepAspectRatio);
+            const int dx = (thumbR.width()  - fitted.width())  / 2;
+            const int dy = (thumbR.height() - fitted.height()) / 2;
+            const QRect dst(thumbR.x() + dx, thumbR.y() + dy,
+                            fitted.width(), fitted.height());
+            p.drawPixmap(dst, fd.thumb);
+        }
     } else {
         // Placeholder: dark fill + dimmed frame number centered
         p.fillRect(thumbR, QColor(38, 38, 38));
@@ -287,6 +303,11 @@ void FrameStripWidget::drawCell(QPainter& p, int idx) const
     p.setPen(selected ? QColor(255, 230, 30) : bc);
     p.setFont(QFont("Consolas", 8));
     p.drawText(labelR, Qt::AlignCenter, labelTxt);
+
+    // ── Drag ghost — dim the cell that is being dragged ───────────────────
+    if (m_dragActive && idx == m_dragSourceIdx) {
+        p.fillRect(cr, QColor(0, 0, 0, 170));
+    }
 }
 
 QRect FrameStripWidget::cellRect(int idx) const
@@ -301,6 +322,15 @@ int FrameStripWidget::cellAtX(int x) const
     int idx = x / SLOT_W;
     if (idx < 0 || idx >= m_frames.size()) return -1;
     return idx;
+}
+
+// Returns the insertion gap index (0 … frameCount) nearest to x.
+// Gap 0 = before frame 0, gap N = after the last frame.
+int FrameStripWidget::dropTargetAtX(int x) const
+{
+    // The centre of the gap between frame[i-1] and frame[i] is at i * SLOT_W.
+    int candidate = (x + SLOT_W / 2) / SLOT_W;
+    return qBound(0, candidate, m_frames.size());
 }
 
 QColor FrameStripWidget::borderColor(char type) const
@@ -321,6 +351,13 @@ void FrameStripWidget::mousePressEvent(QMouseEvent* e)
 
     int idx = cellAtX(e->position().toPoint().x());
     if (idx < 0) { QWidget::mousePressEvent(e); return; }
+
+    // Save drag-start state regardless of modifiers.  The actual drag is only
+    // activated once the mouse moves more than the threshold in mouseMoveEvent.
+    m_dragSourceIdx = idx;
+    m_dragStartX    = e->position().toPoint().x();
+    m_dragActive    = false;
+    m_dropInsertIdx = -1;
 
     bool ctrl  = e->modifiers() & Qt::ControlModifier;
     bool shift = e->modifiers() & Qt::ShiftModifier;
@@ -348,6 +385,43 @@ void FrameStripWidget::mousePressEvent(QMouseEvent* e)
 
     update();
     emit selectionChanged(m_selected);
+    e->accept();
+}
+
+void FrameStripWidget::mouseMoveEvent(QMouseEvent* e)
+{
+    if (!(e->buttons() & Qt::LeftButton) || m_dragSourceIdx < 0) {
+        QWidget::mouseMoveEvent(e); return;
+    }
+
+    const int x  = e->position().toPoint().x();
+    const int dx = x - m_dragStartX;
+
+    // Activate drag once the mouse moves more than 8 pixels horizontally.
+    if (!m_dragActive && std::abs(dx) > 8)
+        m_dragActive = true;
+
+    if (m_dragActive) {
+        m_dropInsertIdx = dropTargetAtX(x);
+        update();
+    }
+    e->accept();
+}
+
+void FrameStripWidget::mouseReleaseEvent(QMouseEvent* e)
+{
+    if (e->button() != Qt::LeftButton) { QWidget::mouseReleaseEvent(e); return; }
+
+    if (m_dragActive && m_dragSourceIdx >= 0 && m_dropInsertIdx >= 0) {
+        emit frameReorderRequested(m_dragSourceIdx, m_dropInsertIdx);
+    }
+
+    // Reset drag state and repaint to clear the drop indicator.
+    m_dragActive    = false;
+    m_dragSourceIdx = -1;
+    m_dragStartX    = -1;
+    m_dropInsertIdx = -1;
+    update();
     e->accept();
 }
 
@@ -417,6 +491,9 @@ TimelineWidget::TimelineWidget(QWidget* parent)
 
     connect(m_strip, &FrameStripWidget::selectionChanged,
             this, &TimelineWidget::onStripSelectionChanged);
+
+    connect(m_strip, &FrameStripWidget::frameReorderRequested,
+            this, &TimelineWidget::frameReorderRequested);
 }
 
 TimelineWidget::~TimelineWidget()

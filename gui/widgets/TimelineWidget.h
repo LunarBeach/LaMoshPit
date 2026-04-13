@@ -50,10 +50,15 @@ public:
 
 signals:
     void selectionChanged(QVector<int> selected);
+    // Emitted when the user drag-drops a frame to a new position.
+    // insertBeforeIdx is in original (pre-move) coordinates.
+    void frameReorderRequested(int sourceIdx, int insertBeforeIdx);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
 
@@ -61,11 +66,18 @@ private:
     void drawCell(QPainter& p, int idx) const;
     QRect cellRect(int idx) const;
     int   cellAtX(int x)   const;
+    int   dropTargetAtX(int x) const;
     QColor borderColor(char type) const;
 
     QVector<FrameThumbData> m_frames;
     QVector<int>            m_selected;
     int                     m_lastClicked = -1;
+
+    // ── Drag-reorder state ────────────────────────────────────────────────
+    bool m_dragActive    = false;   // true once drag threshold is exceeded
+    int  m_dragSourceIdx = -1;      // frame being dragged
+    int  m_dragStartX    = -1;      // mouse X at button-press
+    int  m_dropInsertIdx = -1;      // insertion gap (0..frameCount), updated live
 };
 
 // =============================================================================
@@ -94,6 +106,8 @@ public:
 signals:
     void frameSelected(int frameIndex);          // emitted on single-frame selection
     void selectionChanged(QVector<int> indices); // emitted on every selection change
+    // Forwarded from the inner strip when the user drag-reorders a frame.
+    void frameReorderRequested(int sourceIdx, int insertBeforeIdx);
 
 private slots:
     void onThumbnailReady(int frameIndex, QPixmap thumb);

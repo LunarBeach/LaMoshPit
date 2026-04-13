@@ -4,6 +4,7 @@
 #include <QSet>
 
 #include "core/model/GlobalEncodeParams.h"
+#include "core/presets/PresetManager.h"
 
 class QComboBox;
 class QSpinBox;
@@ -46,9 +47,18 @@ signals:
 private slots:
     void onPresetSelected(int idx);
 
+    // User preset slots
+    void onUserPresetSave();
+    void onUserPresetDelete();
+    void onUserPresetImport();
+
+private:
+    void refreshUserPresets();
+
 private:
     QComboBox*      m_presetCombo;
     ToggleSwitch*   m_cbKillIFrames;   // prominent top-level toggle
+    ToggleSwitch*   m_cbScenecut;
 
     // ── Frame structure
     QSpinBox*       m_sbGopSize;
@@ -96,6 +106,20 @@ private:
     // ── Lookahead
     QSpinBox*       m_sbLookahead;
 
+    // ── Rate-control fidelity
+    ToggleSwitch*   m_cbQcompEnable;
+    QDoubleSpinBox* m_dsbQcomp;
+    ToggleSwitch*   m_cbIpratioEnable;
+    QDoubleSpinBox* m_dsbIpratio;
+    ToggleSwitch*   m_cbPbratioEnable;
+    QDoubleSpinBox* m_dsbPbratio;
+    ToggleSwitch*   m_cbDzInterEnable;
+    QSpinBox*       m_sbDzInter;
+    ToggleSwitch*   m_cbDzIntraEnable;
+    QSpinBox*       m_sbDzIntra;
+    ToggleSwitch*   m_cbQblurEnable;
+    QDoubleSpinBox* m_dsbQblur;
+
     // ── Spatial mask
     QLabel*         m_maskLabel;
     QSpinBox*       m_sbMaskQP;
@@ -106,4 +130,9 @@ private:
 
     // ── Debug logging toggle
     ToggleSwitch*   m_cbDebugLog;
+
+    // ── User preset buttons (presets live in the unified m_presetCombo)
+    QPushButton* m_btnUserPresetSave { nullptr };
+    QPushButton* m_btnUserPresetDel  { nullptr };
+    QPushButton* m_btnUserPresetImport{ nullptr };
 };
