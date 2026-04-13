@@ -6,11 +6,11 @@
 #include "core/model/GlobalEncodeParams.h"
 
 class QComboBox;
-class QCheckBox;
 class QSpinBox;
 class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
+class ToggleSwitch;
 
 // =============================================================================
 // GlobalParamsWidget
@@ -24,7 +24,7 @@ class QPushButton;
 //   1. Pick a preset (or dial in custom values)
 //   2. Optionally capture the current MB painter selection as a "Spatial Mask"
 //      — that selection is then stamped as a QP ROI on EVERY encoded frame
-//   3. Click "Apply Global Params" (triggers MainWindow::onApplyMBEdits via signal)
+//   3. Click "Render" — re-encodes with these settings plus any active MB edits
 // =============================================================================
 class GlobalParamsWidget : public QWidget {
     Q_OBJECT
@@ -38,11 +38,9 @@ public:
     void setParams(const GlobalEncodeParams& p);
 
     // Called by MainWindow when the user paints MBs in the MB editor.
-    // Stores the selection so it can be embedded as a spatial mask.
     void updateSpatialMask(const QSet<int>& mbs);
 
 signals:
-    // Emitted when the user clicks "Apply Global Params + Re-encode".
     void applyRequested();
 
 private slots:
@@ -50,7 +48,7 @@ private slots:
 
 private:
     QComboBox*      m_presetCombo;
-    QCheckBox*      m_cbKillIFrames;  // prominent top-level checkbox
+    ToggleSwitch*   m_cbKillIFrames;   // prominent top-level toggle
 
     // ── Frame structure
     QSpinBox*       m_sbGopSize;
@@ -70,21 +68,21 @@ private:
 
     // ── Partitions / DCT
     QComboBox*      m_cbPartition;
-    QCheckBox*      m_cbx8x8DCT;
+    ToggleSwitch*   m_cbx8x8DCT;
 
     // ── B-frame prediction
     QComboBox*      m_cbDirectMode;
-    QCheckBox*      m_cbWeightedB;
+    ToggleSwitch*   m_cbWeightedB;
     QComboBox*      m_cbWeightedP;
 
     // ── Quantization flags
     QComboBox*      m_cbTrellis;
-    QCheckBox*      m_cbNoFastPSkip;
-    QCheckBox*      m_cbNoDctDecimate;
-    QCheckBox*      m_cbCabacDisable;
+    ToggleSwitch*   m_cbNoFastPSkip;
+    ToggleSwitch*   m_cbNoDctDecimate;
+    ToggleSwitch*   m_cbCabacDisable;
 
     // ── Deblocking
-    QCheckBox*      m_cbNoDeblock;
+    ToggleSwitch*   m_cbNoDeblock;
     QSpinBox*       m_sbDeblockA;
     QSpinBox*       m_sbDeblockB;
 
@@ -93,7 +91,7 @@ private:
     QDoubleSpinBox* m_dsbPsyTrellis;
     QComboBox*      m_cbAQMode;
     QDoubleSpinBox* m_dsbAQStrength;
-    QCheckBox*      m_cbMBTreeDisable;
+    ToggleSwitch*   m_cbMBTreeDisable;
 
     // ── Lookahead
     QSpinBox*       m_sbLookahead;
@@ -106,6 +104,6 @@ private:
 
     QPushButton*    m_btnApply;
 
-    // ── Debug logging toggle ───────────────────────────────────────────────────
-    QCheckBox*      m_cbDebugLog;
+    // ── Debug logging toggle
+    ToggleSwitch*   m_cbDebugLog;
 };

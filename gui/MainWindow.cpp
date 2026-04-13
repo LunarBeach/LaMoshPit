@@ -13,6 +13,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QSplitter>
+#include <QEvent>
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QFileDialog>
@@ -24,6 +25,29 @@
 #include <QLabel>
 #include <QThread>
 #include <QFile>
+#include <QAction>
+#include <cmath>
+
+// =============================================================================
+// Button factory helpers
+// =============================================================================
+
+static QPushButton* makeTimelineBtn(const QString& text,
+                                    const QString& color,
+                                    QWidget* parent)
+{
+    auto* b = new QPushButton(text, parent);
+    b->setFixedHeight(30);
+    b->setMinimumWidth(88);
+    b->setEnabled(false);
+    b->setStyleSheet(
+        QString("QPushButton { background:#0d0d0d; color:%1; border:1.5px solid %1; "
+                "border-radius:4px; font:bold 9pt 'Consolas'; padding:0 8px; }"
+                "QPushButton:hover { background:#181818; border-color:#ffffff; color:#ffffff; }"
+                "QPushButton:pressed { background:#222; }"
+                "QPushButton:disabled { color:#2a2a2a; border-color:#1e1e1e; }").arg(color));
+    return b;
+}
 
 // =============================================================================
 // Constructor / Destructor
@@ -33,189 +57,270 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_videoSequence(new VideoSequence())
 {
-    auto* central = new QWidget(this);
-    auto* rootLayout = new QVBoxLayout(central);
-    rootLayout->setContentsMargins(4, 4, 4, 4);
-    rootLayout->setSpacing(4);
+    setMinimumSize(1000, 640);
+    buildLayout();
+    buildMenuBar();
+    statusBar()->showMessage("LaMoshPit — Ready for chaos");
+}
 
-    // ── Timeline strip ───────────────────────────────────────────────────
-    m_timeline = new TimelineWidget(this);
-    rootLayout->addWidget(m_timeline);
+MainWindow::~MainWindow()
+{
+    delete m_videoSequence;
+}
 
-    connect(m_timeline, &TimelineWidget::selectionChanged,
-            this, &MainWindow::onSelectionChanged);
+// =============================================================================
+// buildLayout — the 4-quadrant + timeline strip design
+//
+//  ┌──────────────────────────────────────────────────┐
+//  │  Preview Player  │  MB Editor                    │  ← top splitter
+//  ├──────────────────┴───────────────────────────────┤
+//  │  Timeline ─────────────────────────  [buttons]   │  ← timeline panel
+//  ├──────────────────┬───────────────────────────────┤
+//  │  Quick Mosh      │  Global Encode Params          │  ← bottom splitter
+//  └──────────────────┴───────────────────────────────┘
+// =============================================================================
 
-    // ── Conversion controls row ──────────────────────────────────────────
-    auto* ctrlRow = new QWidget(this);
+void MainWindow::buildLayout()
+{
+    // ── Outer vertical splitter ──────────────────────────────────────────────
+    m_outerSplitter = new QSplitter(Qt::Vertical, this);
+    m_outerSplitter->setChildrenCollapsible(false);
+    m_outerSplitter->setHandleWidth(4);
+
+    // ── TOP: Preview (left) | MB Editor (right) ─────────────────────────────
+    m_topSplitter = new QSplitter(Qt::Horizontal);
+    m_topSplitter->setChildrenCollapsible(true);
+    m_topSplitter->setHandleWidth(4);
+
+    m_preview  = new PreviewPlayer(this);
+    m_mbWidget = new MacroblockWidget(this);
+
+    // Pop-out / re-dock the preview player to a floating window.
+    connect(m_preview, &PreviewPlayer::popOutRequested, this, [this]() {
+        if (m_previewIsPopped) {
+            // Re-dock: move back into the top splitter at position 0
+            m_topSplitter->insertWidget(0, m_preview);
+            m_preview->show();
+            m_previewIsPopped = false;
+        } else {
+            // Float: detach from splitter, make it a top-level window
+            m_preview->setParent(nullptr);
+            m_preview->setWindowTitle("Preview \u2014 LaMoshPit");
+            m_preview->setAttribute(Qt::WA_DeleteOnClose, false);
+            m_preview->installEventFilter(this);
+            m_preview->resize(900, 560);
+            m_preview->show();
+            m_previewIsPopped = true;
+        }
+    });
+
+    m_topSplitter->addWidget(m_preview);
+    m_topSplitter->addWidget(m_mbWidget);
+    m_topSplitter->setStretchFactor(0, 3);
+    m_topSplitter->setStretchFactor(1, 2);
+    m_topSplitter->setSizes({ 800, 540 });
+
+    m_outerSplitter->addWidget(m_topSplitter);
+
+    // ── MIDDLE: Timeline panel (full width) ──────────────────────────────────
+    auto* timelinePanel = new QWidget(this);
+    timelinePanel->setObjectName("TimelinePanel");
+    timelinePanel->setStyleSheet(
+        "#TimelinePanel { background:#080808; border-top:1px solid #1e1e1e; "
+        "                 border-bottom:1px solid #1e1e1e; }");
+    timelinePanel->setMinimumHeight(100);
+    timelinePanel->setMaximumHeight(160);
+
+    auto* tlLayout = new QVBoxLayout(timelinePanel);
+    tlLayout->setContentsMargins(0, 0, 0, 0);
+    tlLayout->setSpacing(0);
+
+    // Timeline widget itself
+    m_timeline = new TimelineWidget(timelinePanel);
+    tlLayout->addWidget(m_timeline, 1);
+
+    // Control button row beneath the timeline
+    auto* ctrlRow = new QWidget(timelinePanel);
+    ctrlRow->setFixedHeight(38);
+    ctrlRow->setStyleSheet("background:#060606; border-top:1px solid #1a1a1a;");
     auto* ctrlLayout = new QHBoxLayout(ctrlRow);
-    ctrlLayout->setContentsMargins(2, 2, 2, 2);
-    ctrlLayout->setSpacing(6);
+    ctrlLayout->setContentsMargins(8, 4, 8, 4);
+    ctrlLayout->setSpacing(5);
 
-    m_selectionLabel = new QLabel("No frames selected", this);
-    m_selectionLabel->setStyleSheet("color: #888; font: 9pt 'Consolas';");
+    m_selectionLabel = new QLabel("No frames selected", ctrlRow);
+    m_selectionLabel->setStyleSheet(
+        "QLabel { color:#3a3a3a; font:8pt 'Consolas'; background:transparent; }");
+    m_selectionLabel->setMinimumWidth(140);
     ctrlLayout->addWidget(m_selectionLabel);
+    ctrlLayout->addSpacing(8);
 
-    ctrlLayout->addStretch(1);
+    // Frame type buttons — colour-coded to match timeline badges
+    m_btnForceI   = makeTimelineBtn("Force \u2192 I", "#ffffff", ctrlRow);
+    m_btnForceP   = makeTimelineBtn("Force \u2192 P", "#4488ff", ctrlRow);
+    m_btnForceB   = makeTimelineBtn("Force \u2192 B", "#ff64b4", ctrlRow);
+    m_btnDelete   = makeTimelineBtn("\u2716 Delete",   "#ff3333", ctrlRow);
+    m_btnDupLeft  = makeTimelineBtn("\u276E Dup",      "#00ff88", ctrlRow);
+    m_btnDupRight = makeTimelineBtn("Dup \u276F",      "#00ff88", ctrlRow);
 
-    auto makeBtn = [this](const QString& text, const QString& css) {
-        auto* b = new QPushButton(text, this);
-        b->setFixedHeight(28);
-        b->setMinimumWidth(80);
-        b->setEnabled(false);
-        b->setStyleSheet(css);
-        return b;
-    };
-
-    m_btnForceI = makeBtn(
-        "Force \u2192 I",
-        "QPushButton { background:#222; color:#ffffff; border:2px solid #ffffff; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#555; border-color:#444; }");
-
-    m_btnForceP = makeBtn(
-        "Force \u2192 P",
-        "QPushButton { background:#222; color:#4488ff; border:2px solid #4488ff; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#336; border-color:#336; }");
-
-    m_btnForceB = makeBtn(
-        "Force \u2192 B",
-        "QPushButton { background:#222; color:#ff64b4; border:2px solid #ff64b4; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#533; border-color:#533; }");
-
-    m_btnDelete = makeBtn(
-        "\u2716 Delete",
-        "QPushButton { background:#222; color:#ff4444; border:2px solid #ff4444; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#533; border-color:#422; }");
-
-    m_btnDupLeft = makeBtn(
-        "\u276E Dup",
-        "QPushButton { background:#222; color:#44ffaa; border:2px solid #44ffaa; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#254; border-color:#253; }");
-
-    m_btnDupRight = makeBtn(
-        "Dup \u276F",
-        "QPushButton { background:#222; color:#44ffaa; border:2px solid #44ffaa; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#254; border-color:#253; }");
-
-    m_btnApplyMB = makeBtn(
-        "Apply MB Edits",
-        "QPushButton { background:#222; color:#ffaa00; border:2px solid #ffaa00; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#543; border-color:#432; }");
-
-    m_btnUndo = makeBtn(
-        "\u21A9 Undo",
-        "QPushButton { background:#222; color:#ffcc44; border:2px solid #ffcc44; "
-        "border-radius:4px; font:bold 10pt; }"
-        "QPushButton:hover { background:#333; }"
-        "QPushButton:disabled { color:#554; border-color:#443; }");
+    // Undo
+    m_btnUndo = new QPushButton("\u21A9 Undo", ctrlRow);
+    m_btnUndo->setFixedHeight(30);
+    m_btnUndo->setMinimumWidth(80);
     m_btnUndo->setEnabled(false);
+    m_btnUndo->setStyleSheet(
+        "QPushButton { background:#1a1800; color:#ffdd00; border:1.5px solid #ffdd00; "
+        "border-radius:4px; font:bold 9pt 'Consolas'; }"
+        "QPushButton:hover  { background:#222000; border-color:#ffee44; color:#ffee44; }"
+        "QPushButton:pressed { background:#333200; }"
+        "QPushButton:disabled { color:#3a3400; border-color:#2a2800; }");
 
     ctrlLayout->addWidget(m_btnForceI);
     ctrlLayout->addWidget(m_btnForceP);
     ctrlLayout->addWidget(m_btnForceB);
-    ctrlLayout->addSpacing(12);
+    ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnDupLeft);
     ctrlLayout->addWidget(m_btnDupRight);
-    ctrlLayout->addSpacing(12);
+    ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnDelete);
-    ctrlLayout->addSpacing(12);
-    ctrlLayout->addWidget(m_btnApplyMB);
-    ctrlLayout->addSpacing(12);
+    ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnUndo);
-    ctrlLayout->addSpacing(12);
 
-    m_progressBar = new QProgressBar(this);
-    m_progressBar->setFixedHeight(16);
+    ctrlLayout->addStretch(1);
+
+    m_progressBar = new QProgressBar(ctrlRow);
+    m_progressBar->setFixedHeight(14);
+    m_progressBar->setFixedWidth(180);
     m_progressBar->setRange(0, 100);
     m_progressBar->setVisible(false);
-    m_progressBar->setStyleSheet(
-        "QProgressBar { background:#1a1a1a; border:1px solid #444; border-radius:3px; }"
-        "QProgressBar::chunk { background:#4488ff; }");
-    ctrlLayout->addWidget(m_progressBar, 1);
+    ctrlLayout->addWidget(m_progressBar);
 
-    rootLayout->addWidget(ctrlRow);
+    tlLayout->addWidget(ctrlRow);
 
-    // ── Quick Mosh panel ──────────────────────────────────────────────────
-    m_quickMosh = new QuickMoshWidget(this);
-    rootLayout->addWidget(m_quickMosh);
+    m_outerSplitter->addWidget(timelinePanel);
 
-    // ── Preview + MB editor + Global Params panel ─────────────────────────
-    m_preview      = new PreviewPlayer(this);
-    m_mbWidget     = new MacroblockWidget(this);
+    // ── BOTTOM: Quick Mosh (left) | Global Params (right) ───────────────────
+    m_bottomSplitter = new QSplitter(Qt::Horizontal);
+    m_bottomSplitter->setChildrenCollapsible(true);
+    m_bottomSplitter->setHandleWidth(4);
+
+    m_quickMosh   = new QuickMoshWidget(this);
+    m_globalParams = new GlobalParamsWidget(this);
+
+    // Bitstream debug widget — hidden by default, toggled from View menu
+    m_bitstreamTest = new BitstreamTestWidget(this);
+    m_bitstreamTest->setVisible(false);
+
+    m_bottomSplitter->addWidget(m_quickMosh);
+    m_bottomSplitter->addWidget(m_globalParams);
+    m_bottomSplitter->addWidget(m_bitstreamTest);
+    m_bottomSplitter->setStretchFactor(0, 1);
+    m_bottomSplitter->setStretchFactor(1, 3);
+    m_bottomSplitter->setStretchFactor(2, 0);
+    m_bottomSplitter->setSizes({ 300, 900, 0 });
+
+    m_outerSplitter->addWidget(m_bottomSplitter);
+
+    // Outer splitter proportions: top=~480, timeline=120, bottom=~300
+    m_outerSplitter->setStretchFactor(0, 3);
+    m_outerSplitter->setStretchFactor(1, 0);
+    m_outerSplitter->setStretchFactor(2, 2);
+    m_outerSplitter->setSizes({ 480, 120, 300 });
+
+    // The outer splitter IS the central widget
+    setCentralWidget(m_outerSplitter);
+
+    // ── Stub widgets (not shown in main layout) ──────────────────────────────
+    m_propertyPanel = new PropertyPanel(this);
+    m_propertyPanel->setVisible(false);
+
+    // ── Signal connections ────────────────────────────────────────────────────
+    connect(m_timeline, &TimelineWidget::selectionChanged,
+            this, &MainWindow::onSelectionChanged);
+
     connect(m_timeline, &TimelineWidget::selectionChanged,
             m_mbWidget, &MacroblockWidget::setActiveFrameRange);
 
-    m_globalParams = new GlobalParamsWidget(this);
-    m_propertyPanel = new PropertyPanel(this);
+    connect(m_mbWidget, &MacroblockWidget::frameNavigated,
+            this, &MainWindow::onMBFrameNavigated);
 
-    auto* midSplitter = new QSplitter(Qt::Horizontal);
-    midSplitter->addWidget(m_preview);
-    midSplitter->addWidget(m_mbWidget);
-    midSplitter->addWidget(m_globalParams);
-    midSplitter->addWidget(m_propertyPanel);
-    midSplitter->setStretchFactor(0, 3);
-    midSplitter->setStretchFactor(1, 2);
-    midSplitter->setStretchFactor(2, 2);
-    midSplitter->setStretchFactor(3, 0);
-    rootLayout->addWidget(midSplitter, 4);
+    connect(m_mbWidget, &MacroblockWidget::mbSelectionChanged,
+            m_globalParams, &GlobalParamsWidget::updateSpatialMask);
 
-    // ── Bitstream test widget ────────────────────────────────────────────
-    m_bitstreamTest = new BitstreamTestWidget(this);
-    rootLayout->addWidget(m_bitstreamTest, 1);
+    connect(m_globalParams, &GlobalParamsWidget::applyRequested,
+            this, &MainWindow::onApplyGlobalParams);
 
-    setCentralWidget(central);
+    connect(m_quickMosh, &QuickMoshWidget::moshRequested,
+            this, &MainWindow::onQuickMosh);
 
-    // ── Menu ─────────────────────────────────────────────────────────────
-    auto* fileMenu = menuBar()->addMenu("File");
-    fileMenu->addAction("Open Video...", this, &MainWindow::openFile);
-    fileMenu->addAction("Save Mosh Pit...", this, &MainWindow::saveHacked);
-
-    statusBar()->showMessage("LaMoshPit — Ready for chaos");
-
-    // ── Button connections ────────────────────────────────────────────────
     connect(m_btnForceI,   &QPushButton::clicked, this, &MainWindow::onForceI);
     connect(m_btnForceP,   &QPushButton::clicked, this, &MainWindow::onForceP);
     connect(m_btnForceB,   &QPushButton::clicked, this, &MainWindow::onForceB);
     connect(m_btnDelete,   &QPushButton::clicked, this, &MainWindow::onDeleteFrames);
     connect(m_btnDupLeft,  &QPushButton::clicked, this, &MainWindow::onDupLeft);
     connect(m_btnDupRight, &QPushButton::clicked, this, &MainWindow::onDupRight);
-    connect(m_btnApplyMB,  &QPushButton::clicked, this, &MainWindow::onApplyMBEdits);
     connect(m_btnUndo,     &QPushButton::clicked, this, &MainWindow::onUndo);
-
-    // Bidirectional timeline ↔ MB editor sync:
-    // MB Prev/Next → update timeline selection to match
-    connect(m_mbWidget, &MacroblockWidget::frameNavigated,
-            this, &MainWindow::onMBFrameNavigated);
-
-    // MB painter selection → GlobalParamsWidget spatial mask preview
-    connect(m_mbWidget, &MacroblockWidget::mbSelectionChanged,
-            m_globalParams, &GlobalParamsWidget::updateSpatialMask);
-
-    // GlobalParamsWidget "Apply" button → full re-encode with global params
-    connect(m_globalParams, &GlobalParamsWidget::applyRequested,
-            this, &MainWindow::onApplyGlobalParams);
-
-    // Quick Mosh panel
-    connect(m_quickMosh, &QuickMoshWidget::moshRequested,
-            this, &MainWindow::onQuickMosh);
 }
 
-MainWindow::~MainWindow()
+// =============================================================================
+// buildMenuBar
+// =============================================================================
+
+void MainWindow::buildMenuBar()
 {
-    delete m_videoSequence;
+    // File menu
+    auto* fileMenu = menuBar()->addMenu("&File");
+    fileMenu->addAction("&Open Video...", this, &MainWindow::openFile,
+                        QKeySequence("Ctrl+O"));
+    fileMenu->addAction("&Save Mosh Pit...", this, &MainWindow::saveHacked,
+                        QKeySequence("Ctrl+S"));
+
+    // View menu — toggle panel visibility
+    auto* viewMenu = menuBar()->addMenu("&View");
+
+    auto makeViewAction = [&](const QString& name, QWidget* panel) -> QAction* {
+        auto* act = viewMenu->addAction(name);
+        act->setCheckable(true);
+        act->setChecked(true);
+        connect(act, &QAction::triggered, this, [this, panel, act, name]() {
+            togglePanel(panel, act, name);
+        });
+        return act;
+    };
+
+    m_actPreview     = makeViewAction("Preview Player",    m_preview);
+    m_actMBEditor    = makeViewAction("MB Editor",         m_mbWidget);
+    viewMenu->addSeparator();
+    m_actQuickMosh   = makeViewAction("Quick Mosh",        m_quickMosh);
+    m_actGlobalParams= makeViewAction("Global Parameters", m_globalParams);
+    viewMenu->addSeparator();
+
+    // Debug tools — off by default
+    m_actDebugTools = viewMenu->addAction("Debug Tools");
+    m_actDebugTools->setCheckable(true);
+    m_actDebugTools->setChecked(false);
+    connect(m_actDebugTools, &QAction::triggered, this, [this](bool on) {
+        m_bitstreamTest->setVisible(on);
+        // Re-expand bottom splitter when debug panel appears
+        if (on) {
+            QList<int> sz = m_bottomSplitter->sizes();
+            if (sz.size() >= 3 && sz[2] < 100) {
+                sz[2] = 220;
+                m_bottomSplitter->setSizes(sz);
+            }
+        }
+    });
+}
+
+// =============================================================================
+// Panel visibility toggle
+// =============================================================================
+
+void MainWindow::togglePanel(QWidget* panel, QAction* action, const QString& /*name*/)
+{
+    bool nowVisible = !panel->isVisible();
+    panel->setVisible(nowVisible);
+    action->setChecked(nowVisible);
+
 }
 
 // =============================================================================
@@ -246,7 +351,6 @@ void MainWindow::openFile()
 
     m_currentVideoPath = outputPath;
 
-    // Clear any undo backup from a previous session
     if (m_hasUndo && !m_undoBackupPath.isEmpty()) {
         QFile::remove(m_undoBackupPath);
         m_hasUndo = false;
@@ -287,9 +391,6 @@ void MainWindow::analyzeImportedVideo(const QString& videoPath)
 
 void MainWindow::populateTimeline(const AnalysisReport& report)
 {
-    // Use the display-order decoded frames (report.frames) so that the type
-    // badge on each thumbnail matches the frame the viewer actually sees.
-    // report.slices is in bitstream/decode order which differs for B-frames.
     QVector<char> types;
     QVector<bool> idrs;
     types.reserve(report.frames.size());
@@ -303,9 +404,7 @@ void MainWindow::populateTimeline(const AnalysisReport& report)
     m_timeline->loadVideo(m_currentVideoPath, types, idrs);
     m_timeline->clearSelection();
     setTransformButtonsEnabled(false);
-    // "Apply MB Edits" and "Mosh Now" are always available once a video is loaded
-    m_btnApplyMB->setEnabled(!m_transformBusy);
-    m_quickMosh ->setMoshEnabled(!m_transformBusy);
+    m_quickMosh->setMoshEnabled(!m_transformBusy);
     m_selectionLabel->setText(
         QString("0 / %1 frames selected").arg(report.frames.size()));
 }
@@ -326,9 +425,6 @@ void MainWindow::onSelectionChanged(const QVector<int>& selected)
             QString("%1 frame%2 selected").arg(n).arg(n == 1 ? "" : "s"));
         setTransformButtonsEnabled(!m_transformBusy);
 
-        // Sync MB editor to the earliest selected frame.
-        // navigateToFrame is a no-op if the MB editor is already there,
-        // which prevents a re-trigger loop when the sync goes the other way.
         int earliest = selected.first();
         for (int idx : selected) if (idx < earliest) earliest = idx;
         m_mbWidget->navigateToFrame(earliest);
@@ -343,10 +439,7 @@ void MainWindow::setTransformButtonsEnabled(bool enabled)
     m_btnDelete  ->setEnabled(enabled);
     m_btnDupLeft ->setEnabled(enabled);
     m_btnDupRight->setEnabled(enabled);
-    // "Apply MB Edits" and "Mosh Now" don't need a timeline selection —
-    // enabled whenever a video is loaded and the transform queue is free.
-    m_btnApplyMB ->setEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
-    m_quickMosh  ->setMoshEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
+    m_quickMosh->setMoshEnabled(!m_transformBusy && !m_currentVideoPath.isEmpty());
 }
 
 // =============================================================================
@@ -359,17 +452,13 @@ void MainWindow::onForceB()       { startTransform(FrameTransformerWorker::Force
 void MainWindow::onDeleteFrames() { startTransform(FrameTransformerWorker::DeleteFrames); }
 void MainWindow::onDupLeft()      { startTransform(FrameTransformerWorker::DuplicateLeft); }
 void MainWindow::onDupRight()     { startTransform(FrameTransformerWorker::DuplicateRight); }
-void MainWindow::onApplyMBEdits() { startTransform(FrameTransformerWorker::MBEditOnly); }
-
 void MainWindow::onApplyGlobalParams()
 {
-    // Re-encode using the GlobalEncodeParams from the panel.
-    // MB edits are included at the same time (additive — both apply together).
     startTransform(FrameTransformerWorker::MBEditOnly, m_globalParams->currentParams());
 }
 
 // =============================================================================
-// Quick Mosh — build a whole-video MBEditMap from a named preset and fire it
+// Quick Mosh
 // =============================================================================
 
 void MainWindow::onQuickMosh(int presetIndex)
@@ -379,13 +468,16 @@ void MainWindow::onQuickMosh(int presetIndex)
     const int total = m_lastAnalysis.frames.size();
     if (total == 0) return;
 
-    // Find the first P-frame — ideal datamosh seed (never frame 0 which is IDR).
+    // Find first P-frame to use as the corruption seed.
     int seedFrame = 1;
-    for (int i = 1; i < (int)m_lastAnalysis.frames.size(); ++i) {
+    for (int i = 1; i < total; ++i) {
         if (m_lastAnalysis.frames[i].pictType == 'P') { seedFrame = i; break; }
     }
+    const int fullCascade = qMax(0, total - seedFrame - 1);
 
-    // Helper: build a cascade seed entry.
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    // Build a whole-frame FrameMBParams (selectedMBs empty = all MBs).
     auto makeSeed = [&](int refDepth, int ghostBlend,
                         int mvDriftX, int mvDriftY, int mvAmplify,
                         int noiseLevel, int pixelOffset, int invertLuma,
@@ -395,7 +487,6 @@ void MainWindow::onQuickMosh(int presetIndex)
                         int colorTwistU, int colorTwistV,
                         int cascadeLen, int cascadeDecay) -> FrameMBParams {
         FrameMBParams p;
-        // selectedMBs intentionally empty — global mode (all MBs) in renderer
         p.refDepth     = refDepth;
         p.ghostBlend   = ghostBlend;
         p.mvDriftX     = mvDriftX;
@@ -419,121 +510,1535 @@ void MainWindow::onQuickMosh(int presetIndex)
         return p;
     };
 
-    // Helper: stamp the same params on every frame (no cascade).
+    // Stamp the same params on every frame (for per-frame effects).
     auto stampAll = [&](MBEditMap& em, const FrameMBParams& tmpl) {
-        for (int i = 0; i < total; ++i)
-            em[i] = tmpl;
+        for (int i = 0; i < total; ++i) em[i] = tmpl;
     };
 
-    const int fullCascade = total - seedFrame - 1; // cascade covers rest of video
+    // Plant burst seeds at regular intervals starting from seedFrame.
+    // Each burst cascades for cascadeLen frames then decays; the gap before
+    // the next seed is the "ebb" — video recovers toward normal, then breaks again.
+    auto plantSeeds = [&](MBEditMap& em, int interval, const FrameMBParams& seed) {
+        for (int f = seedFrame; f < total; f += interval)
+            em[f] = seed;
+    };
+
+    // ── Preset definitions ─────────────────────────────────────────────────────
+    // Each preset owns its GlobalEncodeParams from scratch — the panel is ignored.
 
     MBEditMap edits;
+    GlobalEncodeParams gp;   // default-constructed (-1 = keep encoder default)
 
-    // Preset index must match QuickMoshWidget kMeta order exactly.
     switch (presetIndex) {
-    case 0: // Ghost Smear
-        edits[seedFrame] = makeSeed(
-            /*rd*/1, /*ghost*/80, /*mvX*/0, /*mvY*/0, /*amp*/1,
-            /*noise*/0, /*pxOff*/0, /*inv*/0,
-            /*cxX*/0, /*cxY*/0, /*cOff*/0,
-            /*qp*/0, /*spill*/0, /*sample*/0, /*scatter*/0, /*flatten*/0,
-            /*twU*/0, /*twV*/0,
-            /*cascLen*/fullCascade, /*cascDec*/28);
-        break;
 
-    case 1: // MV Liquify →
-        edits[seedFrame] = makeSeed(
-            1, 40, 70, 0, 3,
-            0, 0, 0,
-            0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0,
-            fullCascade, 15);
-        break;
-
-    case 2: // MV Liquify ↓
-        edits[seedFrame] = makeSeed(
-            1, 40, 0, 70, 3,
-            0, 0, 0,
-            0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0,
-            fullCascade, 15);
-        break;
-
-    case 3: // Chroma Bleed
-        edits[seedFrame] = makeSeed(
-            1, 30, 0, 0, 1,
-            0, 0, 0,
-            45, -25, 20,
-            0, 0, 0, 0, 0,
-            0, 0,
-            fullCascade, 32);
-        break;
-
-    case 4: // Vortex
-        edits[seedFrame] = makeSeed(
-            1, 50, 30, -30, 4,
-            60, 20, 0,
-            0, 0, 0,
-            20, 3, 0, 0, 0,
-            0, 0,
-            fullCascade, 35);
-        break;
-
-    case 5: // Scatter Dissolve
-        edits[seedFrame] = makeSeed(
-            1, 50, 0, 0, 1,
-            0, 0, 0,
-            0, 0, 0,
-            0, 0, 15, 25, 0,
-            0, 0,
-            fullCascade, 40);
-        break;
-
-    case 6: // Full Freeze
-        edits[seedFrame] = makeSeed(
-            1, 100, 0, 0, 1,
-            0, 0, 0,
-            0, 0, 0,
-            51, 0, 0, 0, 0,
-            0, 0,
-            fullCascade, 0);
-        break;
-
-    case 7: { // Pixel Disintegrate — stamp every frame
-        FrameMBParams tmpl = makeSeed(
-            0, 0, 0, 0, 1,
-            160, 30, 0,
-            0, 0, 0,
-            45, 0, 0, 0, 0,
-            0, 0,
-            0, 0);
-        stampAll(edits, tmpl);
+    case 0: { // ── P-Frame River ─────────────────────────────────────────────
+        // Pure datamosh baseline: infinite P-frame chain, no MB manipulation.
+        // Lets the encoder's temporal prediction do the work on its own.
+        gp.gopSize      = 0;
+        gp.killIFrames  = true;
+        gp.bFrames      = 0;
+        gp.bAdapt       = 0;
+        gp.refFrames    = 4;
+        gp.subpelRef    = 2;
+        gp.meMethod     = 1;   // hex — slight inaccuracy for organic smear
+        gp.trellis      = 0;
+        gp.mbTreeDisable = true;
+        // No MB edits — pure encoder-structure effect
         break;
     }
 
-    case 8: { // UV Colour Twist — stamp every frame
-        FrameMBParams tmpl = makeSeed(
-            1, 30, 0, 0, 1,
-            0, 0, 0,
-            0, 0, 15,
-            0, 0, 0, 0, 0,
-            50, -50,
-            0, 0);
-        stampAll(edits, tmpl);
+    case 1: { // ── Déjà Vu ───────────────────────────────────────────────────
+        // Deep temporal echo: full-cascade ghost blend from 3 frames back
+        // with a diffuse sample radius to blur the echo source.
+        gp.gopSize      = 0;
+        gp.killIFrames  = true;
+        gp.bFrames      = 0;
+        gp.refFrames    = 8;
+        gp.subpelRef    = 1;
+        gp.trellis      = 0;
+        gp.mbTreeDisable = true;
+        edits[seedFrame] = makeSeed(3, 60, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 2, 0, 0, 0, 0, fullCascade, 45);
         break;
     }
 
-    case 9: { // Block Melt — stamp every frame
-        FrameMBParams tmpl = makeSeed(
-            0, 0, 0, 0, 1,
-            80, 0, 0,
-            0, 0, 0,
-            40, 0, 0, 0, 80,
-            0, 0,
-            0, 0);
-        stampAll(edits, tmpl);
+    case 2: { // ── Block Cathedral ───────────────────────────────────────────
+        // 16×16-only partitions, deblocking off, block-flatten every frame.
+        // The encoder sees perfectly flat reference blocks → massive boundary
+        // artifacts and a stained-glass mosaic aesthetic.
+        gp.gopSize      = 0;
+        gp.killIFrames  = true;
+        gp.partitionMode = 0;  // 16×16 only
+        gp.subpelRef    = 0;
+        gp.trellis      = 0;
+        gp.noDeblock    = true;
+        gp.use8x8DCT    = false;
+        gp.meMethod     = 0;   // diamond — least accurate
+        gp.meRange      = 8;
+        gp.mbTreeDisable = true;
+        stampAll(edits, makeSeed(0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                 0, 0, 0, 0, 40, 0, 0, 0, 0));
+        break;
+    }
+
+    case 3: { // ── Warp Smear ─────────────────────────────────────────────────
+        // Strong diagonal MV drift at 3× amplification, seeded once and
+        // cascaded with slow decay for a fluid liquid-warp throughout.
+        gp.gopSize      = 0;
+        gp.killIFrames  = true;
+        gp.refFrames    = 8;
+        gp.noDeblock    = true;
+        gp.subpelRef    = 0;
+        gp.meMethod     = 0;
+        gp.trellis      = 0;
+        gp.mbTreeDisable = true;
+        edits[seedFrame] = makeSeed(1, 35, 50, 20, 3, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, fullCascade, 20);
+        break;
+    }
+
+    case 4: { // ── VHS Ghost ──────────────────────────────────────────────────
+        // Chroma drift independent of luma + ghost blend cascade.
+        // Produces a warm tape-worn colour-separated echo trail.
+        gp.gopSize      = 0;
+        gp.killIFrames  = true;
+        gp.refFrames    = 6;
+        gp.trellis      = 0;
+        gp.mbTreeDisable = true;
+        edits[seedFrame] = makeSeed(1, 30, 0, 0, 1, 0, 0, 0, 30, 0, 15,
+                                    0, 0, 0, 0, 0, 0, 0, fullCascade, 40);
+        break;
+    }
+
+    case 5: { // ── Corrupted Signal ───────────────────────────────────────────
+        // Heavy noise + reference scatter + forced high-QP range on every frame.
+        // No temporal cascade — raw per-frame digital disintegration.
+        gp.gopSize       = 0;
+        gp.qpMin         = 28;
+        gp.qpMax         = 51;
+        gp.noDeblock     = true;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        gp.noFastPSkip   = true;
+        gp.noDctDecimate = true;
+        gp.meMethod      = 0;
+        stampAll(edits, makeSeed(1, 0, 0, 0, 1, 100, 0, 0, 0, 0, 0,
+                                 20, 0, 0, 8, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 6: { // ── Temporal Collapse ──────────────────────────────────────────
+        // 8 B-frames with 16-frame reference depth + temporal direct mode.
+        // Ghost-blend cascade stacks complex multi-directional temporal predictions.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 8;
+        gp.bAdapt        = 2;
+        gp.refFrames     = 16;
+        gp.directMode    = 1;   // temporal
+        gp.weightedPredB = true;
+        gp.weightedPredP = 2;
+        gp.mbTreeDisable = true;
+        edits[seedFrame] = makeSeed(4, 50, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 3, 0, 0, 0, 0, fullCascade, 30);
+        break;
+    }
+
+    case 7: { // ── Welcome to LA - 10 ────────────────────────────────────────
+        // Subtle ebb-and-flow pulse: bursts every ~45 frames, short cascade,
+        // slow decay. Subjects remain mostly recognisable throughout.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 4;
+        gp.noDeblock     = true;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.trellis       = 0;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 45,
+                   makeSeed(1, 35, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 22, 55));
+        break;
+    }
+
+    case 8: { // ── Welcome to LA - 20 ────────────────────────────────────────
+        // Moderate pulse: bursts every ~35 frames, deeper ghost blend,
+        // cascade lasts longer. Subjects readable but visibly dissolving at hits.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 6;
+        gp.noDeblock     = true;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.trellis       = 0;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 35,
+                   makeSeed(2, 50, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 25, 45));
+        break;
+    }
+
+    case 9: { // ── Welcome to LA - 30 ────────────────────────────────────────
+        // Strong pulse: bursts every ~25 frames + MV drift. The encoder
+        // repeats macroblocks across neighbours; subjects abstract during bursts.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.trellis       = 0;
+        gp.noFastPSkip   = true;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 25,
+                   makeSeed(2, 62, 15, 0, 2, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 28, 38));
+        break;
+    }
+
+    case 10: { // ── Welcome to LA - 40 ───────────────────────────────────────
+        // Intense pulse: bursts every ~18 frames, deeper reference, 3× MV
+        // amplification. Video barely recovers; block echoes spread widely.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 12;
+        gp.noDeblock     = true;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.trellis       = 0;
+        gp.noFastPSkip   = true;
+        gp.noDctDecimate = true;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 18,
+                   makeSeed(3, 75, 25, 0, 3, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 32, 28));
+        break;
+    }
+
+    case 11: { // ── Welcome to LA - NOT TO 50 YOU PSYCHO!!!! ─────────────────
+        // Maximum destruction: bursts every 10 frames. ghostBlend=88, refDepth=4,
+        // 4× MV amplification, QP corruption, noise, and 16×16 block forcing.
+        // The video becomes a cascading macroblock avalanche. You were warned.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.trellis       = 0;
+        gp.noFastPSkip   = true;
+        gp.noDctDecimate = true;
+        gp.partitionMode = 0;  // 16×16 only — maximise block boundary artifacts
+        gp.use8x8DCT     = false;
+        gp.qpMax         = 51;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 10,
+                   makeSeed(4, 88, 40, 15, 4, 40, 0, 0, 0, 0, 0,
+                            25, 2, 0, 0, 0, 0, 0, 38, 15));
+        break;
+    }
+
+    case 12: { // ── Block Wars ─────────────────────────────────────────────────
+        // Strong horizontal MV displacement from 2 frames back, seeded every ~30 frames.
+        // cascadeDecay=0 = hard freeze: cascade frames get ghostBlend=100 + qpDelta=51
+        // (skip MBs, zero residual). Blocks land at wrong positions and stay there until
+        // new motion punches through. No internal scatter — clean block edges (Minecraft).
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;   // 16×16 only — maximise visible block size
+        gp.subpelRef     = 0;   // integer-pixel MVs → step artifacts
+        gp.meMethod      = 0;   // diamond — least accurate → wrong MVs
+        gp.meRange       = 4;   // extremely narrow search → encoder assigns wrong MVs
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        // Seed: pure MV displacement — no ghost blend on seed itself so there is no
+        // haze; just wrong pixels baked in. Cascade freezes them hard (cascadeDecay=0).
+        plantSeeds(edits, 30,
+                   makeSeed(2, 0, 60, 0, 4, 0, 0, 0, 0, 0, 0,
+                            40, 0, 0, 0, 0, 0, 0, 22, 0));
+        break;
+    }
+
+    case 13: { // ── Blockaderade ───────────────────────────────────────────────
+        // Diagonal MV displacement from 3 frames back + heavy internal scatter.
+        // refScatter=20 randomises where each pixel inside the 16×16 block samples
+        // from in the reference, so blocks appear as shattered fragments of a distant
+        // frame rather than clean copies. Hard freeze, zero decay. Seeds every ~25 frames.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 4;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 25,
+                   makeSeed(3, 0, 45, 30, 3, 0, 0, 0, 0, 0, 0,
+                            35, 0, 0, 20, 0, 0, 0, 18, 0));
+        break;
+    }
+
+    case 14: { // ── COVID BLOCK DOWN ───────────────────────────────────────────
+        // Maximum block chaos: extreme displacement (5× amplify) from 4 frames back,
+        // heavy internal scatter, qpDelta=51 on the seed itself forces maximum
+        // quantisation corruption at the moment of impact. meRange=4 means the encoder
+        // cannot find good predictions anywhere — it makes wrong inter-predictions on
+        // top of the already-wrong pixel content. Seeds every ~15 frames so recovery
+        // barely happens before the next hit. You cannot leave the house.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 4;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.noDctDecimate = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 15,
+                   makeSeed(4, 0, 80, -50, 5, 0, 0, 0, 0, 0, 0,
+                            51, 0, 0, 28, 0, 0, 0, 12, 0));
+        break;
+    }
+
+    case 15: { // ── Stepping on LEGGO ──────────────────────────────────────────
+        // Every single frame is stamped with a horizontal MV displacement from
+        // 2 frames back at 3× amplification.  No cascade, no seeds — the block smear
+        // is continuous across the entire clip.  qpDelta=20 encourages the encoder to
+        // lean on the (wrong) prediction and emit large inter blocks rather than fixing
+        // the error with fine residuals.  Blocks slide rightward like tiles on ice.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 8;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(2, 0, 25, 0, 3, 0, 0, 0, 0, 0, 0,
+                                 20, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 16: { // ── Ablockalypse Now ───────────────────────────────────────────
+        // Single large displacement seed every ~45 frames, cascadeLen=40, cascadeDecay=8.
+        // The trail runs for 40 frames before barely easing off — nearly the full gap
+        // between seeds is spent in a block-smear state with only a brief window of
+        // clarity before the next seed fires.  Deep reference (3 frames back) and
+        // strong horizontal displacement create a sustained lego-block river.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 4;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 45,
+                   makeSeed(3, 0, 80, 0, 3, 0, 0, 0, 0, 0, 0,
+                            40, 0, 0, 0, 0, 0, 0, 40, 8));
+        break;
+    }
+
+    case 17: { // ── Road to Prediction ─────────────────────────────────────────
+        // Seeds every 5 frames each trigger a 4-frame hard-freeze cascade (decay=0).
+        // Frame N: blocks displaced.  Frames N+1..N+4: ghostBlend=100 + qpDelta=51
+        // locks them in place.  Frame N+5: new displacement.  Blocks advance in
+        // discrete jolts then hold their wrong position before the next jolt.
+        // The rhythmic step-freeze-step pattern is unlike any continuous drift preset.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 6;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 5,
+                   makeSeed(2, 0, 35, 0, 3, 0, 0, 0, 0, 0, 0,
+                            30, 0, 0, 0, 0, 0, 0, 4, 0));
+        break;
+    }
+
+    case 18: { // ── Why can't I do anything right? ────────────────────────────
+        // Diagonal block trails stamped on every frame at 5× amplification.
+        // The effective displacement is 100px X and 75px Y — blocks are sourced from
+        // very far off-axis positions in the reference frame.  High qpDelta forces
+        // coarse quantisation so the encoder cannot correct the extreme offset;
+        // it must use the wrong prediction as-is.  Everything trails diagonally.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 12;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 6;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(2, 0, 20, 15, 5, 0, 0, 0, 0, 0, 0,
+                                 35, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 19: { // ── SHATTERED EGO ──────────────────────────────────────────────
+        // spillRadius=5 makes each seed infect an 11×11 MB neighbourhood as one
+        // coordinated zone.  The whole zone displaces diagonally then hard-freezes
+        // for 17 frames (decay=0).  Seeds every ~20 frames.  Large groups of blocks
+        // move as a single unit rather than individual 16×16 tiles — the smear area
+        // is much wider than any other preset in this collection.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 4;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 20,
+                   makeSeed(2, 0, 55, 35, 3, 0, 0, 0, 0, 0, 0,
+                            35, 5, 0, 0, 0, 0, 0, 17, 0));
+        break;
+    }
+
+    case 20: { // ── LEGGO MY EGO ───────────────────────────────────────────────
+        // Every frame stamped from content 5 frames back at 4× diagonal amplification.
+        // refDepth=5 means the reference has already been corrupted 4 additional times
+        // by prior encodes of those frames — the displacement compounds through the
+        // temporal chain into something the encoder cannot unravel.  High qpDelta on
+        // every frame prevents any correction.  Maximum sustained compound block trail.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 16;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 4;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.noDctDecimate = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(5, 0, 30, 20, 4, 0, 0, 0, 0, 0, 0,
+                                 35, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 21: { // ── What is real? ───────────────────────────────────────────────
+        // Seeds every 4 frames, cascadeLen=3, cascadeDecay=0.
+        // meRange=16 (wider than block-war presets) lets the encoder find good
+        // predictions in static areas → those MBs skip cleanly.  Only motion areas,
+        // where the encoder cannot reconcile our pixel manipulation with a good match,
+        // accumulate wrong inter-predictions → small scattered block artifacts there.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 4;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 1;
+        gp.meMethod      = 1;   // hex — better accuracy in static areas
+        gp.meRange       = 16;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 4,
+                   makeSeed(1, 0, 18, 0, 2, 0, 0, 0, 0, 0, 0,
+                            15, 0, 0, 0, 0, 0, 0, 3, 0));
+        break;
+    }
+
+    case 22: { // ── Mandella Effect ────────────────────────────────────────────
+        // 3-frame seed interval, cascadeLen=2, cascadeDecay=0.
+        // Extremely rapid cycle: 1 displaced frame, 2 frozen, repeat.
+        // Very short windows mean effects never fully commit — blocks flicker
+        // and scatter constantly at motion edges, each wrong frame becoming the
+        // reference for the next.  meRange=20 maximises static-area skipping.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 4;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 1;
+        gp.meMethod      = 1;
+        gp.meRange       = 20;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 3,
+                   makeSeed(2, 0, 12, 8, 2, 0, 0, 0, 0, 0, 0,
+                            20, 0, 0, 0, 0, 0, 0, 2, 0));
+        break;
+    }
+
+    case 23: { // ── 12 years Sober ─────────────────────────────────────────────
+        // Seeds every 10 frames, cascadeLen=8, cascadeDecay=0.
+        // Pure upward drift (mvDriftY=-22) at 3× amplification: blocks are sourced
+        // from 2 frames back, shifted 66px upward.  Vertical subject motion creates
+        // upward smear trails; horizontal-only areas skip cleanly.  Cascade runs
+        // for 8 hard frames giving the trail real duration before next seed.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 6;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 12;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 10,
+                   makeSeed(2, 0, 0, -22, 3, 0, 0, 0, 0, 0, 0,
+                            22, 0, 0, 0, 0, 0, 0, 8, 0));
+        break;
+    }
+
+    case 24: { // ── Halifax Explosion ──────────────────────────────────────────
+        // Seeds every 8 frames at 4× amplification (effective 220px horizontal,
+        // 140px upward displacement); cascadeLen=5, cascadeDecay=0.
+        // Very high amplitude but short cascade: each seed is a violent block
+        // detonation that impacts and clears in 5 frames, leaving almost normal
+        // video before the next explosion.  meRange=8 keeps encoder accuracy low.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 8;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 8,
+                   makeSeed(2, 0, 55, -35, 4, 0, 0, 0, 0, 0, 0,
+                            40, 0, 0, 0, 0, 0, 0, 5, 0));
+        break;
+    }
+
+    case 25: { // ── Rainbow Road ───────────────────────────────────────────────
+        // Every frame stamped with horizontal block drift PLUS colorTwistU=+80 /
+        // colorTwistV=-80 on all motion-area blocks → strong magenta-red hue shift
+        // wherever the encoder assigns inter blocks instead of skip.  Static areas
+        // skip cleanly and keep correct colour; motion areas accumulate coloured
+        // block trails.  No cascade — the hue corruption is fully continuous.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 6;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 1;
+        gp.meMethod      = 1;
+        gp.meRange       = 16;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(2, 0, 20, 0, 2, 0, 0, 0, 0, 0, 0,
+                                 20, 0, 0, 0, 0, 80, -80, 0, 0));
+        break;
+    }
+
+    case 26: { // ── Ego Death ──────────────────────────────────────────────────
+        // Seeds every 6 frames, cascadeLen=5, cascadeDecay=0.
+        // colorTwistU=-100 / colorTwistV=+100 on seed frames = strong cyan-green.
+        // chromaDriftX=50 carries colour-plane fringing through every cascade frame
+        // (cascade propagates chromaDrift scaled by the fade factor).
+        // Diagonal block drift at 3×; motion areas smear in cyan, then freeze.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 12;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 6,
+                   makeSeed(2, 0, 25, -15, 3, 0, 0, 0, 50, 0, 0,
+                            30, 0, 0, 0, 0, -100, 100, 5, 0));
+        break;
+    }
+
+    case 27: { // ── K Hole ─────────────────────────────────────────────────────
+        // Every frame stamped from 3 frames back; colorTwistU=+70 / colorTwistV=+70
+        // shifts both chroma axes in the same direction → deep magenta-purple zone.
+        // chromaDriftY=+30 vertically offsets colour planes from luma, creating
+        // vertical colour halos at block edges.  chromaOffset=+20 lifts saturation.
+        // Motion blocks bloom into purple clusters; static areas skip clean.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 8;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(3, 0, 15, 15, 2, 0, 0, 0, 0, 30, 20,
+                                 25, 0, 0, 0, 0, 70, 70, 0, 0));
+        break;
+    }
+
+    case 28: { // ── Hyaluronic Acid ────────────────────────────────────────────
+        // Seeds every 5 frames, cascadeLen=4, cascadeDecay=0.
+        // chromaDriftX=60 slides colour planes 60px horizontally relative to luma
+        // → vivid colour halos at every hard block edge; this fringing carries
+        // through the cascade (chromaDrift is propagated).
+        // colorTwistU=-50 / colorTwistV=+80 warms the seed hue.
+        // Diagonal luma drift at 2× keeps block displacement subtle.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 6;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 1;
+        gp.meMethod      = 1;
+        gp.meRange       = 16;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 5,
+                   makeSeed(2, 0, 18, -12, 2, 0, 0, 0, 60, -30, 0,
+                            20, 0, 0, 0, 0, -50, 80, 4, 0));
+        break;
+    }
+
+    case 29: { // ── You belong in Prison ───────────────────────────────────────
+        // Every frame stamped with colorTwistU=+127 / colorTwistV=-127
+        // (maximum possible chrominance distortion in both axes simultaneously)
+        // plus chromaOffset=-60 (heavy chroma suppression underneath the twist).
+        // Horizontal block drift at 3× runs the full clip continuously.
+        // There is no parole.  There is no early release.  You did this.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 12;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 0;
+        gp.meMethod      = 0;
+        gp.meRange       = 8;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.qpMax         = 51;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        stampAll(edits, makeSeed(2, 0, 22, 0, 3, 0, 0, 0, 0, 0, -60,
+                                 35, 0, 0, 0, 0, 127, -127, 0, 0));
+        break;
+    }
+
+    case 30: { // ── Ohgee ──────────────────────────────────────────────────────
+        // The balanced OG: seeds every 5 frames, cascadeLen=6, cascadeDecay=0.
+        // Diagonal 3× luma drift from 2 frames back; chromaDriftX=45 carries
+        // colour-plane fringing through every cascade frame; colorTwistU=+60 /
+        // colorTwistV=-70 on seed frames.  meRange=16 keeps artifacts naturally
+        // scattered at motion boundaries.  Everything working together.
+        gp.gopSize       = 0;
+        gp.killIFrames   = true;
+        gp.bFrames       = 0;
+        gp.refFrames     = 8;
+        gp.noDeblock     = true;
+        gp.partitionMode = 0;
+        gp.subpelRef     = 1;
+        gp.meMethod      = 1;
+        gp.meRange       = 16;
+        gp.trellis       = 0;
+        gp.use8x8DCT     = false;
+        gp.mbTreeDisable = true;
+        gp.psyRD         = 0.0f;
+        gp.aqMode        = 0;
+        plantSeeds(edits, 5,
+                   makeSeed(2, 0, 28, 18, 3, 0, 0, 0, 45, 0, 0,
+                            25, 0, 0, 0, 0, 60, -70, 6, 0));
+        break;
+    }
+
+    case 31: { // ── The Deep ──────────────────────────────────────────────────
+        // Every frame displaced from 7 frames back (max refDepth). Wide meRange=24
+        // means the encoder finds good predictions in static areas (skip MBs) and
+        // accumulates wrong predictions only at motion — a deep temporal block ocean.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        stampAll(edits, makeSeed(7, 0, 8, 5, 2, 0, 0, 0, 0, 0, 0,
+                                 12, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 32: { // ── Undertow ──────────────────────────────────────────────────
+        // Horizontal drift oscillates across 3 full sine cycles using a per-seed
+        // loop. Seeds every 5 frames with a 4-frame hard freeze. Blocks surge
+        // left, ease, surge right in a rhythmic tidal current pattern.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(55.0f * sinf(t * 6.0f * 3.14159265f));
+                edits[f] = makeSeed(3, 0, dx, 0, 2, 0, 0, 0, 0, 0, 0,
+                                    15, 0, 0, 0, 0, 0, 0, 4, 0);
+            }
+        }
+        break;
+    }
+
+    case 33: { // ── Riptide ───────────────────────────────────────────────────
+        // Seeds every 3 frames alternate direction: +45 then -45. 2-frame hard
+        // freeze at 3x amplification. Chaotic crosscurrent of battling block forces.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 18; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 3;
+            int idx = 0;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                int dx = (idx % 2 == 0) ? 45 : -45;
+                edits[f] = makeSeed(2, 0, dx, 0, 3, 0, 0, 0, 0, 0, 0,
+                                    20, 0, 0, 0, 0, 0, 0, 2, 0);
+            }
+        }
+        break;
+    }
+
+    case 34: { // ── Kelp Forest ───────────────────────────────────────────────
+        // Vertical drift oscillates across 4 sine cycles. Seeds every 7 frames
+        // with a 5-frame hard freeze. Blocks sway up then down like underwater kelp.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 7;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dy = (int)(48.0f * sinf(t * 8.0f * 3.14159265f));
+                edits[f] = makeSeed(3, 0, 0, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    15, 0, 0, 0, 0, 0, 0, 5, 0);
+            }
+        }
+        break;
+    }
+
+    case 35: { // ── Tsunami ───────────────────────────────────────────────────
+        // Rare massive horizontal seeds every 80 frames, each spawning a 60-frame
+        // cascade at 5x amplification. One event is a wall of blocks that colonises
+        // the frame for a very long time before slowly subsiding.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 0;
+        gp.meRange = 16; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 80, makeSeed(4, 0, 100, 0, 5, 0, 0, 0, 0, 0, 0,
+                                       30, 0, 0, 0, 0, 0, 0, 60, 3));
+        break;
+    }
+
+    case 36: { // ── Whirlpool ─────────────────────────────────────────────────
+        // Circular drift via sin/cos traces 4 full rotations at 60px amplitude.
+        // Seeds every 5 frames with a 4-frame hard freeze. Blocks spiral in
+        // coordinated clockwise loops across the entire clip.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(60.0f * sinf(t * 8.0f * 3.14159265f));
+                int dy = (int)(60.0f * cosf(t * 8.0f * 3.14159265f));
+                edits[f] = makeSeed(3, 0, dx, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    20, 0, 0, 0, 0, 0, 0, 4, 0);
+            }
+        }
+        break;
+    }
+
+    case 37: { // ── Bioluminescence ───────────────────────────────────────────
+        // Every frame stamped with slow diagonal drift from 5 frames back.
+        // chromaDriftX=25 offsets colour planes horizontally; colorTwistU=-70 /
+        // colorTwistV=+60 makes motion blocks bloom in a cyan-green hue.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 16; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        stampAll(edits, makeSeed(5, 0, 18, 12, 2, 0, 0, 0, 25, 0, 0,
+                                 0, 0, 0, 0, 0, -70, 60, 0, 0));
+        break;
+    }
+
+    case 38: { // ── The Abyss ─────────────────────────────────────────────────
+        // Maximum refDepth=7 with very minimal drift. meRange=24 means the encoder
+        // finds clean predictions in static areas and concentrates block errors only
+        // at motion zones. A barely-moving wall of temporally ancient blocks.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        stampAll(edits, makeSeed(7, 0, 5, 3, 2, 0, 0, 0, 0, 0, 0,
+                                 15, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 39: { // ── Coral Reef ────────────────────────────────────────────────
+        // Circular drift traces 2 full rotations at 30px amplitude. Seeds every
+        // 3 frames with a 2-frame freeze. meRange=18 scatters effects naturally
+        // at motion. A diverse, scattered colony of small circular block motion.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 18; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 3;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(30.0f * sinf(t * 4.0f * 3.14159265f));
+                int dy = (int)(30.0f * cosf(t * 4.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, dx, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    10, 0, 0, 0, 0, 0, 0, 2, 0);
+            }
+        }
+        break;
+    }
+
+    case 40: { // ── Monsoon ───────────────────────────────────────────────────
+        // Every frame displaced downward at 3x from 2 frames back. mvDriftY=30
+        // with mvDriftX=5 for slight diagonal. Blocks cascade downward like
+        // relentless tropical rain throughout the entire clip.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 12; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        stampAll(edits, makeSeed(2, 0, 5, 30, 3, 0, 0, 0, 0, 0, 0,
+                                 10, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 41: { // ── The Gyre ──────────────────────────────────────────────────
+        // Growing spiral: radius expands from 12px to 70px across 6 full rotations.
+        // Seeds every 5 frames, 4-frame hard freeze. Blocks begin tight loops then
+        // fan out into wide spiralling arcs as the clip progresses.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                float r = 12.0f + 58.0f * t;
+                int dx = (int)(r * sinf(t * 12.0f * 3.14159265f));
+                int dy = (int)(r * cosf(t * 12.0f * 3.14159265f));
+                dx = dx < -128 ? -128 : (dx > 128 ? 128 : dx);
+                dy = dy < -128 ? -128 : (dy > 128 ? 128 : dy);
+                edits[f] = makeSeed(3, 0, dx, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    20, 0, 0, 0, 0, 0, 0, 4, 0);
+            }
+        }
+        break;
+    }
+
+    case 42: { // ── Sea Foam ──────────────────────────────────────────────────
+        // Very frequent seeds every 2 frames, each spawning a 1-frame freeze at
+        // 2x amplification. meRange=24 concentrates small block groups at motion
+        // only. A perpetual light froth of displaced pixels across the whole clip.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 2, makeSeed(2, 0, 12, 0, 2, 0, 0, 0, 0, 0, 0,
+                                      10, 0, 0, 0, 0, 0, 0, 1, 0));
+        break;
+    }
+
+    case 43: { // ── Rogue Wave ────────────────────────────────────────────────
+        // Enormous horizontal seeds every 90 frames spawn 60-frame cascades at
+        // 5x amplification. Each event is a singular wall of blocks that colonises
+        // the frame for a prolonged burst before the next detonation.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 0;
+        gp.meRange = 16; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 90, makeSeed(4, 0, 110, 0, 5, 0, 0, 0, 0, 0, 0,
+                                       35, 0, 0, 0, 0, 0, 0, 60, 2));
+        break;
+    }
+
+    case 44: { // ── Gulf Stream ───────────────────────────────────────────────
+        // Every frame displaced horizontally from 3 frames back at 2x amplification.
+        // colorTwistU=+30 warms motion blocks with an orange-amber cast. A continuous
+        // warm westward ocean current running through the entire clip.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 16; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        stampAll(edits, makeSeed(3, 0, 25, 0, 2, 0, 0, 0, 0, 0, 0,
+                                 10, 0, 0, 0, 0, 30, 0, 0, 0));
+        break;
+    }
+
+    case 45: { // ── Vortex Current ────────────────────────────────────────────
+        // 8 full circular rotations via sin/cos at 45px amplitude. Seeds every
+        // 4 frames with a 3-frame hard freeze. Blocks spin in rapid tight circles
+        // throughout the whole clip — fast, hypnotic, relentless.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 4;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(45.0f * sinf(t * 16.0f * 3.14159265f));
+                int dy = (int)(45.0f * cosf(t * 16.0f * 3.14159265f));
+                edits[f] = makeSeed(3, 0, dx, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    15, 0, 0, 0, 0, 0, 0, 3, 0);
+            }
+        }
+        break;
+    }
+
+    case 46: { // ── Dead Calm ─────────────────────────────────────────────────
+        // Rare seeds every 60 frames each spawn a 55-frame cascade with slow decay.
+        // meRange=20 concentrates errors at motion zones. The ocean barely moves,
+        // then shifts slowly and for a very long time before the next event.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 60, makeSeed(4, 0, 15, 0, 2, 0, 0, 0, 0, 0, 0,
+                                       10, 0, 0, 0, 0, 0, 0, 55, 2));
+        break;
+    }
+
+    case 47: { // ── Sonar Ping ────────────────────────────────────────────────
+        // Seeds every 6 frames with short 2-frame hard-freeze cascades at 3x
+        // diagonal displacement. Narrow meRange=10 creates dense block clusters
+        // at each ping before fully clearing for the next outward pulse.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 0;
+        gp.meRange = 10; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 6, makeSeed(2, 0, 40, -25, 3, 0, 0, 0, 0, 0, 0,
+                                      20, 0, 0, 0, 0, 0, 0, 2, 0));
+        break;
+    }
+
+    case 48: { // ── Coriolis ──────────────────────────────────────────────────
+        // Drift traces exactly one full circle across the entire clip. Seeds every
+        // 7 frames with a 5-frame hard freeze at 50px amplitude. Blocks circle once
+        // in a slow geophysical arc — the whole clip is one planetary rotation.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 7;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(50.0f * sinf(t * 2.0f * 3.14159265f));
+                int dy = (int)(50.0f * cosf(t * 2.0f * 3.14159265f));
+                edits[f] = makeSeed(3, 0, dx, dy, 2, 0, 0, 0, 0, 0, 0,
+                                    15, 0, 0, 0, 0, 0, 0, 5, 0);
+            }
+        }
+        break;
+    }
+
+    case 49: { // ── The Hadal Zone ────────────────────────────────────────────
+        // Every frame stamped with strong downward displacement from 7 frames back
+        // at 3x amplification. qpDelta=35 forces coarse block quantisation.
+        // meRange=8 forces wrong predictions everywhere — maximum crushing depth.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 0;
+        gp.meRange = 8; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        gp.qpMax = 51;
+        stampAll(edits, makeSeed(7, 0, 0, 35, 3, 0, 0, 0, 0, 0, 0,
+                                 35, 0, 0, 0, 0, 0, 0, 0, 0));
+        break;
+    }
+
+    case 50: { // ── Poseidon ──────────────────────────────────────────────────
+        // 5 full circular rotations at 70px amplitude from 4 frames back. Each seed
+        // carries chromaDriftX=40 and colorTwistU=+80 / colorTwistV=-90 (deep
+        // magenta-red hue). 3-frame hard freeze. Peak ocean-god block chaos.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        gp.qpMax = 51;
+        {
+            const int interval = 4;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(70.0f * sinf(t * 10.0f * 3.14159265f));
+                int dy = (int)(70.0f * cosf(t * 10.0f * 3.14159265f));
+                dx = dx < -128 ? -128 : (dx > 128 ? 128 : dx);
+                dy = dy < -128 ? -128 : (dy > 128 ? 128 : dy);
+                edits[f] = makeSeed(4, 0, dx, dy, 3, 0, 0, 0, 40, 0, 0,
+                                    25, 0, 0, 0, 0, 80, -90, 3, 0);
+            }
+        }
+        break;
+    }
+
+    // =========================================================================
+    // =========================================================================
+    // Cases 71-75: Block Trail Echoes — mosaic block smear at motion only.
+    //
+    // MECHANISM (revised):
+    //   • Seed: ghostBlend=0 (no global pixel blending), blockFlatten=80-100
+    //     collapses every MB's luma to its spatial average — a flat uniform
+    //     colour. qpDelta=51 on the seed forces the encoder to zero residual,
+    //     so the flat blocks survive into the output unchanged.
+    //   • This creates one frame of full-frame mosaic at seed time.
+    //   • Cascade (ghostBlend=100, qpDelta=51, cascadeDecay=0): copies the
+    //     previous encoded frame verbatim. For static MBs the flat block at
+    //     the correct colour is copied → looks like subtle pixelation.
+    //     For motion MBs the flat block at the WRONG position is copied →
+    //     hard frozen rectangle stuck where the subject WAS.
+    //   • noDeblock=true: no deblocking filter → sharp block edges (critical).
+    //   • partitionMode=0: 16×16 MBs only → large square blocks, not 4×4.
+    //   • meRange=22-24: encoder searches widely for skip MBs in static areas.
+    //
+    // Result: hard, perfectly square, flat-coloured frozen blocks that trail
+    //         behind moving subjects. Background pixelates briefly at correct
+    //         colours then recovers. No global frame movement at all.
+    // =========================================================================
+
+    case 71: { // ── Block Trail Echoes 1 ──────────────────────────────────────
+        // Lightest: blockFlatten=80 (partial flatten), qpDelta=51 (locks flat
+        // blocks in). 7-frame hard-freeze cascade. Seeds every 10 frames →
+        // 3-frame clean recovery. Subtle pixelated trail at motion edges.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        // ghostBlend=0, blockFlatten=80, qpDelta=51, cascadeLen=7, cascadeDecay=0
+        plantSeeds(edits, 10, makeSeed(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                       51, 0, 0, 0, 80, 0, 0, 7, 0));
+        break;
+    }
+
+    case 72: { // ── Block Trail Echoes 2 ──────────────────────────────────────
+        // Light-medium: blockFlatten=90 (nearly full uniform colour), qpDelta=51.
+        // 10-frame hard-freeze cascade. Seeds every 13 frames → 3-frame gap.
+        // Slightly harder flat blocks than BTE-1; trails are more rectangular.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        // ghostBlend=0, blockFlatten=90, qpDelta=51, cascadeLen=10, cascadeDecay=0
+        plantSeeds(edits, 13, makeSeed(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                       51, 0, 0, 0, 90, 0, 0, 10, 0));
+        break;
+    }
+
+    case 73: { // ── Block Trail Echoes 3 ──────────────────────────────────────
+        // Medium: full blockFlatten=100 — every seed-frame MB becomes a perfect
+        // flat uniform colour. qpDelta=51. 14-frame hard freeze. Seeds every 17
+        // frames → 3-frame gap. meRange=24 maximises encoder freedom for static
+        // skip. Subject motion leaves hard flat-colour rectangular mosaic trail.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        // ghostBlend=0, blockFlatten=100, qpDelta=51, cascadeLen=14, cascadeDecay=0
+        plantSeeds(edits, 17, makeSeed(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                       51, 0, 0, 0, 100, 0, 0, 14, 0));
+        break;
+    }
+
+    case 74: { // ── Block Trail Echoes 4 ──────────────────────────────────────
+        // Heavy: full blockFlatten=100, qpDelta=51. 18-frame hard-freeze cascade.
+        // Seeds every 22 frames → 4-frame clean gap. Thick, persistent mosaic
+        // blocks frozen at subject's position for nearly a full second at 24fps.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        // ghostBlend=0, blockFlatten=100, qpDelta=51, cascadeLen=18, cascadeDecay=0
+        plantSeeds(edits, 22, makeSeed(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                       51, 0, 0, 0, 100, 0, 0, 18, 0));
+        break;
+    }
+
+    case 75: { // ── Block Trail Echoes 5 ──────────────────────────────────────
+        // Maximum: full blockFlatten=100, qpDelta=51. 23-frame hard-freeze cascade.
+        // Seeds every 27 frames → 4-frame clean gap. Longest sustained flat-block
+        // mosaic trail. Hard, sticky, perfectly square frozen rectangles clustered
+        // entirely at subject motion. The strongest motion-isolated mosaic preset.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 16;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        // ghostBlend=0, blockFlatten=100, qpDelta=51, cascadeLen=23, cascadeDecay=0
+        plantSeeds(edits, 27, makeSeed(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                       51, 0, 0, 0, 100, 0, 0, 23, 0));
+        break;
+    }
+
+    // Cases 51-70: space-themed, motion-isolated smear presets.
+    // KEY DESIGN: meRange=20-24 + cascadeDecay>0 + low mvAmplify(1-2) + no
+    // stampAll. Wide meRange lets the encoder find correct predictions in
+    // static areas (skip MBs) so the cascade's qpDelta=51 only forces coarse
+    // blocks where the encoder fails to find a clean reference — i.e. motion.
+    // =========================================================================
+
+    case 51: { // ── Nebula Drift ──────────────────────────────────────────────
+        // Seeds every 4 frames. 8-frame cascade, cascadeDecay=12 means ghostBlend
+        // fades gently. meRange=22 + mvAmplify=1: static areas skip cleanly,
+        // only motion zones accumulate soft trailing block residue.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 4, makeSeed(2, 0, 20, 10, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 8, 12));
+        break;
+    }
+
+    case 52: { // ── Solar Flare ───────────────────────────────────────────────
+        // Seeds every 15 frames, 10-frame cascade, cascadeDecay=8. Strong
+        // horizontal displacement seeds the burst; static areas recover fully
+        // between events while motion zones remain smeared through the cascade.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 15, makeSeed(2, 0, 35, 0, 2, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 10, 8));
+        break;
+    }
+
+    case 53: { // ── Asteroid Belt ─────────────────────────────────────────────
+        // Very frequent seeds every 2 frames, 2-frame cascade, cascadeDecay=18.
+        // meRange=24 + mvAmplify=1 = maximum static skip. Diagonal 18/-12px
+        // displacement. Only moving subjects collect any visible smear at all.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 2, makeSeed(1, 0, 18, -12, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 2, 18));
+        break;
+    }
+
+    case 54: { // ── Pulsar ────────────────────────────────────────────────────
+        // Seeds every 8 frames, 5-frame cascade, cascadeDecay=20. High decay
+        // means each pulse clears quickly. Static areas skip; motion zones get
+        // a brief block smear that fully restores before the next pulse fires.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 8, makeSeed(2, 0, 30, 0, 2, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 5, 20));
+        break;
+    }
+
+    case 55: { // ── Black Hole ────────────────────────────────────────────────
+        // Circular sin/cos drift traces 2 full rotations at 25px amplitude.
+        // Seeds every 6 frames, 6-frame cascade, cascadeDecay=10. meRange=22
+        // confines smear to subjects; background stays mostly correct.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 6;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(25.0f * sinf(t * 4.0f * 3.14159265f));
+                int dy = (int)(25.0f * cosf(t * 4.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, dx, dy, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 6, 10);
+            }
+        }
+        break;
+    }
+
+    case 56: { // ── Cosmic Ray ────────────────────────────────────────────────
+        // Seeds every 3 frames, 3-frame cascade, cascadeDecay=25. 30/20px
+        // diagonal at 2x. High decay = brief streak on motion then gone.
+        // meRange=20 keeps block smear from spreading into static zones.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 3, makeSeed(1, 0, 30, 20, 2, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 3, 25));
+        break;
+    }
+
+    case 57: { // ── Supernova ─────────────────────────────────────────────────
+        // Seeds every 40 frames, 15-frame cascade, cascadeDecay=5. Large 40/30px
+        // diagonal burst at 2x fully fades before the next event. Motion areas
+        // bear the full impact; static zones recover within the 15-frame window.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 40, makeSeed(2, 0, 40, 30, 2, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 15, 5));
+        break;
+    }
+
+    case 58: { // ── Dark Matter ───────────────────────────────────────────────
+        // Seeds every 5 frames, 4-frame cascade, cascadeDecay=30. meRange=24,
+        // mvAmplify=1, only 8/5px drift. Virtually invisible in static areas;
+        // barely-there block haze clings to motion zones only.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 5, makeSeed(2, 0, 8, 5, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 4, 30));
+        break;
+    }
+
+    case 59: { // ── Quasar ────────────────────────────────────────────────────
+        // Horizontal drift follows 2 sine cycles across the clip. Seeds every
+        // 5 frames, 6-frame cascade, cascadeDecay=10. meRange=22. Smear direction
+        // reverses mid-clip but stays confined to motion subjects throughout.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(30.0f * sinf(t * 4.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, dx, 0, 2, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 6, 10);
+            }
+        }
+        break;
+    }
+
+    case 60: { // ── Event Horizon ─────────────────────────────────────────────
+        // Circular drift traces 3 full rotations at 35px amplitude. Seeds every
+        // 5 frames, 5-frame cascade, cascadeDecay=8. meRange=22 confines circular
+        // block smear to moving subjects; static zones skip correctly.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(35.0f * sinf(t * 6.0f * 3.14159265f));
+                int dy = (int)(35.0f * cosf(t * 6.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, dx, dy, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 5, 8);
+            }
+        }
+        break;
+    }
+
+    case 61: { // ── Comet Trail ───────────────────────────────────────────────
+        // Seeds every 12 frames, 8-frame cascade, cascadeDecay=6. 40px right /
+        // 15px up at 2x. The smear trail fans diagonally from motion and fades
+        // fully before the next seed fires. Background untouched.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 12, makeSeed(2, 0, 40, -15, 2, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 8, 6));
+        break;
+    }
+
+    case 62: { // ── Stellar Wind ──────────────────────────────────────────────
+        // Seeds every 7 frames, 6-frame cascade, cascadeDecay=15. 22px horizontal
+        // at 1x amplification. A soft rightward current smears only motion subjects
+        // while static background skips cleanly through every cascade frame.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 7, makeSeed(2, 0, 22, 0, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 6, 15));
+        break;
+    }
+
+    case 63: { // ── Aurora Borealis ───────────────────────────────────────────
+        // Vertical drift follows 2 sine cycles. chromaDriftX=15 + colorTwistU=-40
+        // / colorTwistV=+50 on seed frames adds a colour wash to motion blocks.
+        // Seeds every 8 frames, 5-frame cascade, cascadeDecay=12. meRange=22.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 8;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dy = (int)(25.0f * sinf(t * 4.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, 0, dy, 1, 0, 0, 0, 15, 0, 0,
+                                    0, 0, 0, 0, 0, -40, 50, 5, 12);
+            }
+        }
+        break;
+    }
+
+    case 64: { // ── Magnetar ──────────────────────────────────────────────────
+        // Seeds every 20 frames, 6-frame cascade, cascadeDecay=20. Strong 50/35px
+        // diagonal at 2x. meRange=24 = maximum encoder freedom in static areas.
+        // Despite the strong seed, the wide meRange keeps smear at motion only.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 20, makeSeed(3, 0, 50, 35, 2, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 6, 20));
+        break;
+    }
+
+    case 65: { // ── Wormhole ──────────────────────────────────────────────────
+        // Seeds every 4 frames alternate between +35px and -35px horizontal.
+        // 3-frame cascade, cascadeDecay=20. Opposing smear directions cancel in
+        // static areas but linger as chaotic block trails on moving subjects.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 4;
+            int idx = 0;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                int dx = (idx % 2 == 0) ? 35 : -35;
+                edits[f] = makeSeed(2, 0, dx, 0, 2, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 3, 20);
+            }
+        }
+        break;
+    }
+
+    case 66: { // ── Plasma Stream ─────────────────────────────────────────────
+        // Seeds every 3 frames, 4-frame cascade, cascadeDecay=20. 25/15px
+        // diagonal at 1x. A continuous low-level diagonal stream that the encoder
+        // skips in static zones; visible only where subjects are in motion.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 3, makeSeed(2, 0, 25, 15, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 4, 20));
+        break;
+    }
+
+    case 67: { // ── Gravity Well ──────────────────────────────────────────────
+        // Converging spiral: radius shrinks from 40px to 5px across the clip
+        // while completing 3 full rotations. Seeds every 5 frames, 5-frame
+        // cascade, cascadeDecay=10. Block smear winds inward on motion subjects.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 22; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 5;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                float r = 40.0f - 35.0f * t;
+                int dx = (int)(r * sinf(t * 6.0f * 3.14159265f));
+                int dy = (int)(r * cosf(t * 6.0f * 3.14159265f));
+                edits[f] = makeSeed(2, 0, dx, dy, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 5, 10);
+            }
+        }
+        break;
+    }
+
+    case 68: { // ── Cosmic Web ────────────────────────────────────────────────
+        // 5 rapid circular rotations at tiny 15px amplitude. Seeds every 4 frames,
+        // 3-frame cascade, cascadeDecay=25, meRange=24. Barely-there circular
+        // smear appears as a delicate web of block drift only at moving edges.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 4;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                int dx = (int)(15.0f * sinf(t * 10.0f * 3.14159265f));
+                int dy = (int)(15.0f * cosf(t * 10.0f * 3.14159265f));
+                edits[f] = makeSeed(1, 0, dx, dy, 1, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 3, 25);
+            }
+        }
+        break;
+    }
+
+    case 69: { // ── Stardust ──────────────────────────────────────────────────
+        // Seeds every 2 frames, 2-frame cascade, cascadeDecay=35. 10/8px diagonal
+        // at 1x. meRange=24 maximum. Nothing visible in static zones; a faint
+        // block haze clings to motion subjects and nowhere else.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 24; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        plantSeeds(edits, 2, makeSeed(1, 0, 10, 8, 1, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 2, 35));
+        break;
+    }
+
+    case 70: { // ── Galaxy Collision ──────────────────────────────────────────
+        // Even seeds smear left, odd seeds smear right; both modulated by a sine
+        // amplitude envelope so the force peaks at mid-clip then tapers. Seeds
+        // every 4 frames, 5-frame cascade, cascadeDecay=8. meRange=20.
+        // Opposing currents cancel in static areas, collide at moving subjects.
+        gp.gopSize = 0; gp.killIFrames = true; gp.bFrames = 0; gp.refFrames = 8;
+        gp.noDeblock = true; gp.partitionMode = 0; gp.subpelRef = 1; gp.meMethod = 1;
+        gp.meRange = 20; gp.trellis = 0; gp.use8x8DCT = false;
+        gp.mbTreeDisable = true; gp.psyRD = 0.0f; gp.aqMode = 0;
+        {
+            const int interval = 4;
+            int idx = 0;
+            const int count = (total - seedFrame + interval - 1) / interval;
+            for (int f = seedFrame; f < total; f += interval, ++idx) {
+                float t = count > 1 ? (float)idx / (float)(count - 1) : 0.0f;
+                float envelope = sinf(t * 3.14159265f); // peaks at mid-clip
+                int dx = (int)(40.0f * envelope * ((idx % 2 == 0) ? 1.0f : -1.0f));
+                edits[f] = makeSeed(2, 0, dx, 0, 2, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 5, 8);
+            }
+        }
         break;
     }
 
@@ -541,20 +2046,13 @@ void MainWindow::onQuickMosh(int presetIndex)
         return;
     }
 
-    // Push the edit map into the MB editor so the user can see and adjust it.
     m_mbWidget->loadEditMap(edits);
-
-    // Build encode params — start from whatever the user has configured in the
-    // GlobalParams panel, then unconditionally enforce the two settings that
-    // datamoshing fundamentally requires regardless of panel state:
-    //   killIFrames=true  — without this x264 resets the smear at every I-frame
-    //   gopSize=0         — infinite GOP (keyint=9999); prevents periodic keyframes
-    // Users can still override these in the panel between mosh passes if wanted.
-    GlobalEncodeParams gp = m_globalParams->currentParams();
-    gp.killIFrames = true;
-    gp.gopSize     = 0;   // → keyint=9999:min-keyint=9999:scenecut=0 in encoder
     startTransform(FrameTransformerWorker::MBEditOnly, gp);
 }
+
+// =============================================================================
+// startTransform
+// =============================================================================
 
 void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
                                 const GlobalEncodeParams& globalParams)
@@ -564,19 +2062,27 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
     QVector<int> sel = m_timeline->selectedFrames();
 
     if (type == FrameTransformerWorker::MBEditOnly) {
-        // MBEditOnly re-encodes the entire file.  It can proceed without any
-        // per-MB edits (global params alone still reshape the encoder).
-        // Only show a warning when BOTH editMap is empty AND globalParams is
-        // entirely default — that combination would just wastefully re-encode.
-        bool hasGlobalChange = (globalParams.gopSize != -1 || globalParams.killIFrames ||
-            globalParams.bFrames != -1 || globalParams.refFrames != -1 ||
-            globalParams.qpOverride != -1 || globalParams.qpMin != -1 || globalParams.qpMax != -1 ||
-            globalParams.meMethod != -1 || globalParams.meRange != -1 || globalParams.subpelRef != -1 ||
-            globalParams.partitionMode != -1 || globalParams.trellis != -1 ||
-            globalParams.noFastPSkip || globalParams.noDctDecimate || globalParams.cabacDisable ||
-            globalParams.noDeblock || globalParams.psyRD >= 0.0f || globalParams.aqMode != -1 ||
-            globalParams.mbTreeDisable || !globalParams.spatialMaskMBs.isEmpty());
-        if (m_mbWidget->editMap().isEmpty() && !hasGlobalChange) {
+        bool hasGlobalChange =
+            (globalParams.gopSize != -1 || globalParams.killIFrames ||
+             globalParams.bFrames != -1 || globalParams.refFrames != -1 ||
+             globalParams.qpOverride != -1 || globalParams.qpMin != -1 ||
+             globalParams.qpMax != -1 || globalParams.meMethod != -1 ||
+             globalParams.meRange != -1 || globalParams.subpelRef != -1 ||
+             globalParams.partitionMode != -1 || globalParams.trellis != -1 ||
+             globalParams.noFastPSkip || globalParams.noDctDecimate ||
+             globalParams.cabacDisable || globalParams.noDeblock ||
+             globalParams.psyRD >= 0.0f || globalParams.aqMode != -1 ||
+             globalParams.mbTreeDisable || !globalParams.spatialMaskMBs.isEmpty());
+
+        // Hidden panel logic: if MB editor is not visible, treat its edit map
+        // as empty so no invisible state can silently corrupt the encode.
+        bool mbVisible = m_mbWidget->isVisible();
+        if (!mbVisible && !hasGlobalChange) {
+            statusBar()->showMessage(
+                "Nothing to apply — MB Editor is hidden and no global changes are set.");
+            return;
+        }
+        if (mbVisible && m_mbWidget->editMap().isEmpty() && !hasGlobalChange) {
             statusBar()->showMessage(
                 "Nothing to apply — paint MBs or adjust Global Encode Params first.");
             return;
@@ -585,75 +2091,76 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
         if (sel.isEmpty()) return;
     }
 
-    // Backup current file for one-level undo
+    // Backup for undo
     m_undoBackupPath = m_currentVideoPath + ".undo_backup.mp4";
     QFile::remove(m_undoBackupPath);
     if (!QFile::copy(m_currentVideoPath, m_undoBackupPath)) {
         QMessageBox::warning(this, "Backup Failed",
             "Could not create undo backup. Proceeding anyway (no undo available).");
-        m_hasUndo   = false;
+        m_hasUndo = false;
         m_btnUndo->setEnabled(false);
     } else {
         m_hasUndo = true;
-        m_btnUndo->setEnabled(false); // re-enable after transform completes
+        m_btnUndo->setEnabled(false);
     }
 
-    // Release the media player's file handle so the worker can replace the file
     m_preview->unloadVideo();
-
     m_transformBusy = true;
     setTransformButtonsEnabled(false);
     m_progressBar->setVisible(true);
     m_progressBar->setRange(0, m_lastAnalysis.frames.size());
     m_progressBar->setValue(0);
 
-    static const char* names[] = {"I", "P", "B", "deleted", "duplicated left", "duplicated right", "MB edit"};
     if (type == FrameTransformerWorker::MBEditOnly) {
         statusBar()->showMessage(
             QString("Applying MB edits to %1 frame%2 ...")
                 .arg(m_lastAnalysis.frames.size())
                 .arg(m_lastAnalysis.frames.size() == 1 ? "" : "s"));
     } else {
+        static const char* names[] = {
+            "I","P","B","deleted","dup-left","dup-right","MB edit"
+        };
         statusBar()->showMessage(
             QString("Processing %1 frame%2 → %3 ...")
                 .arg(sel.size()).arg(sel.size() == 1 ? "" : "s").arg(names[type]));
     }
 
-    // Build display-order type roster for delete operations so the worker can
-    // enforce original frame types on remaining frames (datamosh effect).
     QVector<char> origTypes;
     origTypes.reserve(m_lastAnalysis.frames.size());
     for (const FrameInfo& f : m_lastAnalysis.frames)
         origTypes.append(f.pictType);
 
+    // Only send MB edits when the MB editor is visible (hidden-panel logic).
+    MBEditMap edits = m_mbWidget->isVisible() ? m_mbWidget->editMap() : MBEditMap{};
+
     auto* worker = new FrameTransformerWorker(
         m_currentVideoPath, sel, type,
         m_lastAnalysis.frames.size(), origTypes,
-        m_mbWidget->editMap(), globalParams, nullptr);
+        edits, globalParams, nullptr);
     auto* thread = new QThread(this);
     worker->moveToThread(thread);
 
-    connect(thread, &QThread::started,
-            worker, &FrameTransformerWorker::run);
+    connect(thread, &QThread::started,  worker, &FrameTransformerWorker::run);
     connect(worker, &FrameTransformerWorker::progress,
             this,   &MainWindow::onTransformProgress);
     connect(worker, &FrameTransformerWorker::warning,
-            this,   [this](const QString& msg){ statusBar()->showMessage("⚠ " + msg); });
+            this,   [this](const QString& msg){ statusBar()->showMessage("\u26a0 " + msg); });
     connect(worker, &FrameTransformerWorker::done,
             this,   &MainWindow::onTransformDone);
-    connect(worker, &FrameTransformerWorker::done,
-            thread, &QThread::quit);
-    connect(thread, &QThread::finished,
-            worker, &QObject::deleteLater);
-    connect(thread, &QThread::finished,
-            thread, &QObject::deleteLater);
+    connect(worker, &FrameTransformerWorker::done,  thread, &QThread::quit);
+    connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
     thread->start();
 }
 
-void MainWindow::onTransformProgress(int current, int total)
+// =============================================================================
+// Transform progress / completion
+// =============================================================================
+
+void MainWindow::onTransformProgress(int current, int /*total*/)
 {
-    if (total > 0) m_progressBar->setValue(current);
+    m_progressBar->setValue(current);
 }
 
 void MainWindow::onTransformDone(bool success, QString errorMessage)
@@ -664,7 +2171,6 @@ void MainWindow::onTransformDone(bool success, QString errorMessage)
     if (!success) {
         statusBar()->showMessage("Transform failed: " + errorMessage);
         QMessageBox::critical(this, "Transform Failed", errorMessage);
-        // Restore from backup if we have one
         if (m_hasUndo) {
             QFile::remove(m_currentVideoPath);
             QFile::copy(m_undoBackupPath, m_currentVideoPath);
@@ -708,17 +2214,13 @@ void MainWindow::onUndo()
 }
 
 // =============================================================================
-// Reload after transform/undo
+// Reload after transform / undo
 // =============================================================================
 
 void MainWindow::reloadVideoAndTimeline()
 {
     m_preview->loadVideo(m_currentVideoPath);
     m_videoSequence->load(m_currentVideoPath);
-    // analyzeImportedVideo calls m_mbWidget->setVideo on success (fresh import)
-    // but after a transform we call reload so the widget keeps existing edits
-    // and just re-decodes the replacement file at the same frame position.
-    // We still need the full analysis, so run it first, then call reload.
     m_lastAnalysis = BitstreamAnalyzer::analyzeVideo(m_currentVideoPath);
     if (m_lastAnalysis.success) {
         BitstreamAnalyzer::printAnalysis(m_lastAnalysis);
@@ -742,13 +2244,11 @@ void MainWindow::reloadVideoAndTimeline()
 
 void MainWindow::onMBFrameNavigated(int frameIdx)
 {
-    // User pressed Prev/Next in the MB editor — update timeline selection to
-    // reflect the new frame so both views stay in sync.
     m_timeline->setSelection(frameIdx);
 }
 
 // =============================================================================
-// Save (placeholder)
+// Save
 // =============================================================================
 
 void MainWindow::saveHacked()
@@ -756,10 +2256,23 @@ void MainWindow::saveHacked()
     QString fileName = QFileDialog::getSaveFileName(
         this, "Save Mosh Pit", "", "H.264 MP4 Files (*.mp4)");
     if (!fileName.isEmpty()) {
-        // For now: copy the current imported file to the target path
         if (QFile::copy(m_currentVideoPath, fileName))
             statusBar()->showMessage("Saved: " + fileName);
         else
             QMessageBox::warning(this, "Save Failed", "Could not save file.");
     }
+}
+
+// =============================================================================
+// eventFilter — re-docks floating preview when user closes its window.
+// =============================================================================
+bool MainWindow::eventFilter(QObject* obj, QEvent* e)
+{
+    if (obj == m_preview && e->type() == QEvent::Close && m_previewIsPopped) {
+        m_topSplitter->insertWidget(0, m_preview);
+        m_preview->show();
+        m_previewIsPopped = false;
+        return true; // suppress the close event; widget is re-docked
+    }
+    return QMainWindow::eventFilter(obj, e);
 }

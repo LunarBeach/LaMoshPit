@@ -2,8 +2,10 @@
 
 #include <QPainter>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QWheelEvent>
 #include <QThread>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -363,6 +365,25 @@ void FrameStripWidget::keyPressEvent(QKeyEvent* e)
     } else {
         QWidget::keyPressEvent(e);
     }
+}
+
+void FrameStripWidget::wheelEvent(QWheelEvent* e)
+{
+    // Route vertical scroll-wheel delta as horizontal scrolling of the parent
+    // QScrollArea so the timeline can be panned left/right with the mouse wheel.
+    if (e->angleDelta().y() != 0) {
+        QScrollArea* sa = qobject_cast<QScrollArea*>(
+            parentWidget() ? parentWidget()->parent() : nullptr);
+        if (sa) {
+            QScrollBar* hbar = sa->horizontalScrollBar();
+            if (hbar) {
+                hbar->setValue(hbar->value() - e->angleDelta().y() * 3);
+                e->accept();
+                return;
+            }
+        }
+    }
+    QWidget::wheelEvent(e);
 }
 
 // =============================================================================

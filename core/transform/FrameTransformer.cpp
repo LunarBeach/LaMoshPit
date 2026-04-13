@@ -544,9 +544,164 @@ static void applyMBEdits(AVFrame* frame, int frameIdx,
         applyColorTwist(frame, mbs, p.colorTwistU, p.colorTwistV, mbCols);
 }
 
+// ── Bitstream splice for Delete ────────────────────────────────────────────
+// Copies compressed H.264 packets directly to the output, skipping selected
+// frames.  No decode or re-encode takes place, so the original motion vectors
+// in the surviving P-frames are preserved intact.  After deletion those
+// vectors reference content from a different shot → datamosh smear.
+//
+// Prerequisites: the video should be an I/P-only stream (use Force → P with
+// Kill I-Frames first).  B-frame videos have packet DTS order ≠ display order,
+// so the packet counter would not map correctly to timeline frame indices.
+void FrameTransformerWorker::runBitstreamSplice()
+{
+    ControlLogger::instance().logApplyStarted(m_totalFrames, 0);
+
+    const QString tempPath = m_videoPath + ".xform_tmp.mp4";
+    QString errorMsg;
+    bool    ok   = false;
+
+    AVFormatContext* ifmt = nullptr;
+    AVFormatContext* ofmt = nullptr;
+    AVPacket*        pkt  = nullptr;
+    int vsIdx = -1;
+
+    // Warn when B-frames are present — packet order won't match display order.
+    if (m_origFrameTypes.contains('B')) {
+        emit warning(
+            "Delete datamosh requires an I/P-only stream. "
+            "Select all frames \u2192 Force \u2192 P (with Kill I-Frames ON) first, "
+            "then Delete. Proceeding, but frame mapping may be incorrect.");
+    }
+
+    // ── Open input (no decoder needed) ─────────────────────────────────────
+    if (avformat_open_input(&ifmt, m_videoPath.toUtf8().constData(),
+                            nullptr, nullptr) < 0) {
+        errorMsg = "Cannot open input: " + m_videoPath;
+        goto splice_cleanup;
+    }
+    if (avformat_find_stream_info(ifmt, nullptr) < 0) {
+        errorMsg = "avformat_find_stream_info failed";
+        goto splice_cleanup;
+    }
+    for (unsigned i = 0; i < ifmt->nb_streams; i++) {
+        if (ifmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            vsIdx = (int)i; break;
+        }
+    }
+    if (vsIdx < 0) { errorMsg = "No video stream"; goto splice_cleanup; }
+
+    // ── Open output ────────────────────────────────────────────────────────
+    if (avformat_alloc_output_context2(&ofmt, nullptr, nullptr,
+                                       tempPath.toUtf8().constData()) < 0) {
+        errorMsg = "Cannot alloc output context"; goto splice_cleanup;
+    }
+
+    // Mirror every input stream into the output (video + any audio/data).
+    for (unsigned i = 0; i < ifmt->nb_streams; i++) {
+        AVStream* in  = ifmt->streams[i];
+        AVStream* out = avformat_new_stream(ofmt, nullptr);
+        if (!out) { errorMsg = "Cannot create output stream"; goto splice_cleanup; }
+        if (avcodec_parameters_copy(out->codecpar, in->codecpar) < 0) {
+            errorMsg = "Cannot copy codec parameters"; goto splice_cleanup;
+        }
+        out->codecpar->codec_tag = 0;  // let muxer assign the correct tag
+        out->time_base           = in->time_base;
+    }
+
+    if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&ofmt->pb, tempPath.toUtf8().constData(),
+                      AVIO_FLAG_WRITE) < 0) {
+            errorMsg = "Cannot open output file"; goto splice_cleanup;
+        }
+    }
+    if (avformat_write_header(ofmt, nullptr) < 0) {
+        errorMsg = "avformat_write_header failed"; goto splice_cleanup;
+    }
+
+    // ── Copy packets, skipping deleted frames ──────────────────────────────
+    pkt = av_packet_alloc();
+    {
+        AVStream* vs = ifmt->streams[vsIdx];
+
+        // Frame duration in the input video's time_base — used to write
+        // sequential, gap-free output timestamps while leaving the compressed
+        // payload (motion vectors) completely untouched.
+        int64_t frameDur = 0;
+        if (vs->avg_frame_rate.num > 0 && vs->avg_frame_rate.den > 0)
+            frameDur = av_rescale_q(
+                1,
+                AVRational{ vs->avg_frame_rate.den, vs->avg_frame_rate.num },
+                vs->time_base);
+        if (frameDur <= 0) frameDur = 1;
+
+        const QSet<int> delSet(m_frameIndices.begin(), m_frameIndices.end());
+        int     videoFrameIdx = 0;   // packet read-order counter = frame index
+        int64_t outVideoPts   = 0;   // monotonically increasing output PTS
+
+        while (av_read_frame(ifmt, pkt) >= 0) {
+            if (pkt->stream_index == vsIdx) {
+                if (!delSet.contains(videoFrameIdx)) {
+                    // Rewrite only the container timestamps so the muxer gets
+                    // valid monotonic values; the H.264 NAL payload is copied
+                    // byte-for-byte — motion vectors remain intact.
+                    pkt->pts      = outVideoPts;
+                    pkt->dts      = outVideoPts;
+                    pkt->duration = frameDur;
+                    pkt->pos      = -1;
+                    outVideoPts  += frameDur;
+
+                    av_interleaved_write_frame(ofmt, pkt);
+                    emit progress(videoFrameIdx + 1, m_totalFrames);
+                }
+                videoFrameIdx++;
+            } else {
+                // Non-video streams (audio, subtitles): rescale and pass through.
+                AVStream* inS  = ifmt->streams[pkt->stream_index];
+                AVStream* outS = ofmt->streams[pkt->stream_index];
+                av_packet_rescale_ts(pkt, inS->time_base, outS->time_base);
+                pkt->pos = -1;
+                av_interleaved_write_frame(ofmt, pkt);
+            }
+            av_packet_unref(pkt);
+        }
+    }
+    av_write_trailer(ofmt);
+    ok = true;
+
+splice_cleanup:
+    if (pkt)  av_packet_free(&pkt);
+    if (ofmt && !(ofmt->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&ofmt->pb);
+    if (ofmt) avformat_free_context(ofmt);
+    if (ifmt) avformat_close_input(&ifmt);
+
+    if (ok) {
+        if (!QFile::remove(m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot remove original file for replacement";
+            QFile::remove(tempPath);
+        } else if (!QFile::rename(tempPath, m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot rename temp file to original path";
+        }
+    } else {
+        QFile::remove(tempPath);
+    }
+
+    ControlLogger::instance().logApplyCompleted(ok);
+    emit done(ok, errorMsg);
+}
+
 // ── Main re-encode work ────────────────────────────────────────────────────
 void FrameTransformerWorker::run()
 {
+    // Delete is handled by bitstream splice — no decode/re-encode required.
+    if (m_targetType == DeleteFrames) {
+        runBitstreamSplice();
+        return;
+    }
+
     // Log Apply start — records total frames and how many carry edits.
     ControlLogger::instance().logApplyStarted(m_totalFrames, m_mbEdits.size());
 
@@ -926,23 +1081,6 @@ void FrameTransformerWorker::run()
                             }
                             applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
                             encodeAndDrain(frame);
-
-                        } else if (m_targetType == DeleteFrames) {
-                            // ── Delete ───────────────────────────────────
-                            // Selected frames are skipped entirely.
-                            // For remaining frames, enforce their original type
-                            // from the analysis roster so the encoder recalculates
-                            // motion vectors with broken references (datamosh).
-                            if (!inSel) {
-                                if (frameIdx < m_origFrameTypes.size())
-                                    frame->pict_type = pictTypeFromChar(
-                                                           m_origFrameTypes[frameIdx]);
-                                else
-                                    frame->pict_type = AV_PICTURE_TYPE_NONE;
-                                applyMBEdits(frame, frameIdx, mbCols, mbRows, refBuf, activeEdits);
-                                encodeAndDrain(frame);
-                            }
-                            // selected frames are simply skipped
 
                         } else if (m_targetType == MBEditOnly) {
                             // ── MB Edits Only ────────────────────────────

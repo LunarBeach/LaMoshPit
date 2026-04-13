@@ -14,6 +14,8 @@ class QLabel;
 class QDial;
 class QSlider;
 class QSpinBox;
+class QScrollArea;
+class QSplitter;
 
 // =============================================================================
 // MacroblockWidget
@@ -87,6 +89,7 @@ private:
     void loadKnobsFromCurrentFrame();
     void updateNavLabel();
     void setControlsEnabled(bool enabled);
+    bool eventFilter(QObject* obj, QEvent* e) override;
 
     // ── Video state ───────────────────────────────────────────────────────
     QString       m_videoPath;
@@ -102,9 +105,14 @@ private:
 
     // ── Canvas + navigation ───────────────────────────────────────────────
     MBCanvas*    m_canvas;
+    QScrollArea* m_canvasScroll   { nullptr };
+    QSplitter*   m_innerSplitter  { nullptr };
+    float        m_zoom           { 1.0f };
+    bool         m_canvasIsPopped { false };
     QPushButton* m_btnPrev;
     QPushButton* m_btnNext;
     QLabel*      m_navLabel;
+    QPushButton* m_btnPopOutCanvas { nullptr };
 
     // ── Knobs — QUANTIZATION ─────────────────────────────────────────────
     QDial* m_dialQP;    QSpinBox* m_sbQP;
@@ -147,7 +155,10 @@ private:
     QList<QSpinBox*> m_allSpinboxes;
 
     // ── Other controls ────────────────────────────────────────────────────
-    QSpinBox*    m_sbBrush;
+    QSlider*     m_sliderBrush;
+    QLabel*      m_lblBrush;
+    QSlider*     m_sliderZoom;
+    QLabel*      m_lblZoom;
     QPushButton* m_btnClearFrame;
     QPushButton* m_btnClearAll;
 };

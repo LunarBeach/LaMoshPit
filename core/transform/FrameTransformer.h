@@ -19,6 +19,11 @@
 //   • mvDrift  → pixel substitution from a ring-buffered reference frame
 //                so the encoder assigns the desired motion vectors
 //   • refDepth → which buffered reference frame to source pixels from
+//
+// DeleteFrames is handled separately via runBitstreamSplice(), which copies
+// compressed packets directly without decode/re-encode.  This preserves the
+// original H.264 motion vectors so they reference content from the wrong shot
+// after the cut — the classic datamosh smear effect.
 // =============================================================================
 class FrameTransformerWorker : public QObject {
     Q_OBJECT
@@ -29,9 +34,8 @@ public:
                     };
 
     // origFrameTypes: display-order frame type chars from the last analysis
-    // ('I','P','B'). When provided, Delete operations enforce the original type
-    // on every remaining frame so the encoder recalculates predictions with
-    // broken references (datamosh effect) rather than freely re-typing frames.
+    // ('I','P','B').  Used by the splice path to detect B-frame content, and
+    // by Force I/P/B re-encode to restore frame types on unselected frames.
     //
     // mbEdits: per-frame macroblock edit parameters from MacroblockWidget.
     FrameTransformerWorker(const QString& videoPath,
@@ -52,6 +56,10 @@ signals:
     void done(bool success, QString errorMessage);
 
 private:
+    // Bitstream splice for DeleteFrames: copies compressed packets without
+    // decode/re-encode so original motion vectors are preserved (datamosh).
+    void runBitstreamSplice();
+
     QString            m_videoPath;
     QVector<int>       m_frameIndices;
     TargetType         m_targetType;

@@ -55,6 +55,7 @@ protected:
     void paintEvent(QPaintEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
 
 private:
     void drawCell(QPainter& p, int idx) const;

@@ -19,6 +19,9 @@ public:
     void updateFrame(int frameIndex);
     void setStatus(const QString &status);
 
+signals:
+    void popOutRequested();
+
 private slots:
     void playPause();
     void stop();
@@ -41,6 +44,8 @@ private:
     QPushButton *m_stopButton;
     QPushButton *m_nextFrameButton;
     QPushButton *m_prevFrameButton;
+    QPushButton *m_loopButton;
+    QPushButton *m_popOutButton;
     QSlider *m_positionSlider;
     
     QString m_currentVideoPath;

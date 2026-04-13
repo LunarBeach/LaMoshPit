@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LaMoshPit — User Manual</title>
+<style>
+  :root {
+    --bg:       #0e0e0e;
+    --bg2:      #141414;
+    --bg3:      #1a1a1a;
+    --border:   #2a2a2a;
+    --txt:      #cccccc;
+    --dim:      #888888;
+    --accent:   #ff00ff;
+    --blue:     #4488ff;
+    --green:    #44ffaa;
+    --orange:   #ffaa00;
+    --red:      #ff4444;
+    --pink:     #ff64b4;
+    --yellow:   #ffee44;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--txt);
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.65;
+    padding: 0 0 60px 0;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Nav ── */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: #080808ee;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 32px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-size: 11px;
+  }
+  nav span { color: var(--accent); font-weight: bold; margin-right: 4px; }
+  nav a { color: var(--dim); }
+  nav a:hover { color: var(--txt); }
+
+  /* ── Page header ── */
+  header {
+    text-align: center;
+    padding: 48px 32px 32px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #1a001a 0%, var(--bg) 100%);
+  }
+  header h1 {
+    font-size: 2.8em;
+    color: var(--accent);
+    letter-spacing: 4px;
+    text-shadow: 0 0 24px var(--accent);
+  }
+  header .subtitle {
+    color: var(--dim);
+    font-size: 0.95em;
+    margin-top: 8px;
+  }
+  header .tagline {
+    color: var(--green);
+    font-size: 0.85em;
+    margin-top: 6px;
+    font-style: italic;
+  }
+
+  /* ── Layout ── */
+  .page { max-width: 1100px; margin: 0 auto; padding: 0 28px; }
+
+  /* ── Sections ── */
+  section { margin-top: 48px; }
+  section > h2 {
+    font-size: 1.3em;
+    color: var(--accent);
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 20px;
+    letter-spacing: 2px;
+  }
+  h3 {
+    font-size: 1.05em;
+    color: var(--orange);
+    margin: 28px 0 10px;
+    letter-spacing: 1px;
+  }
+  h4 {
+    font-size: 0.95em;
+    color: var(--green);
+    margin: 18px 0 6px;
+  }
+  p { margin-bottom: 10px; color: var(--txt); }
+  ul, ol { padding-left: 22px; margin-bottom: 10px; }
+  li { margin-bottom: 4px; }
+
+  /* ── Info boxes ── */
+  .box {
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 14px 0;
+    border-left: 4px solid;
+  }
+  .box.tip    { background: #001a0a; border-color: var(--green);  }
+  .box.warn   { background: #1a0800; border-color: var(--orange); }
+  .box.key    { background: #0a001a; border-color: var(--accent); }
+  .box.info   { background: #001222; border-color: var(--blue);   }
+  .box-title  { font-weight: bold; margin-bottom: 6px; font-size: 0.9em; }
+  .tip  .box-title { color: var(--green);  }
+  .warn .box-title { color: var(--orange); }
+  .key  .box-title { color: var(--accent); }
+  .info .box-title { color: var(--blue);   }
+
+  /* ── Control tables ── */
+  .ctrl-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 24px;
+    font-size: 12px;
+  }
+  .ctrl-table th {
+    background: var(--bg3);
+    color: var(--dim);
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .ctrl-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .ctrl-table tr:hover td { background: #151515; }
+  .ctrl-table .ctrl-name {
+    color: var(--yellow);
+    white-space: nowrap;
+    font-weight: bold;
+    min-width: 130px;
+  }
+  .ctrl-table .ctrl-range {
+    color: var(--dim);
+    white-space: nowrap;
+    min-width: 100px;
+  }
+  .ctrl-table .ctrl-effect { color: var(--txt); }
+  .ctrl-table .ctrl-result { color: #aaddff; }
+
+  /* ── Cheat-sheet flow chart ── */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 14px 0;
+    align-items: flex-start;
+  }
+  .flow-box {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    min-width: 180px;
+    flex: 1;
+  }
+  .flow-box .fb-title {
+    font-weight: bold;
+    font-size: 0.85em;
+    margin-bottom: 6px;
+    letter-spacing: 1px;
+  }
+  .flow-box ul { padding-left: 14px; font-size: 0.85em; }
+  .flow-arrow {
+    align-self: center;
+    color: var(--accent);
+    font-size: 1.4em;
+    padding: 0 4px;
+    flex: 0;
+  }
+  .col-accent { color: var(--accent); }
+  .col-orange { color: var(--orange); }
+  .col-blue   { color: var(--blue);   }
+  .col-green  { color: var(--green);  }
+  .col-pink   { color: var(--pink);   }
+  .col-red    { color: var(--red);    }
+  .col-yellow { color: var(--yellow); }
+
+  /* ── Quick ref grid ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 12px 0; }
+  @media (max-width: 700px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .card h4 { margin-top: 0; margin-bottom: 6px; }
+  .card ul { font-size: 0.85em; padding-left: 16px; }
+
+  /* ── Preset badges ── */
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
+    margin: 12px 0;
+  }
+  .preset-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .preset-card .pname {
+    font-weight: bold;
+    font-size: 0.9em;
+    margin-bottom: 4px;
+  }
+  .preset-card .ptag  { font-size: 0.75em; color: var(--dim); margin-bottom: 6px; }
+  .preset-card .pdesc { font-size: 0.8em;  color: var(--txt); }
+
+  /* ── Separator ── */
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+
+  /* ── Inline code ── */
+  code {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 0.9em;
+    color: var(--green);
+  }
+
+  /* ── Button replica badges ── */
+  .btn-i    { display:inline-block; background:#222; color:#fff;    border:2px solid #fff;    border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-p    { display:inline-block; background:#222; color:#4488ff; border:2px solid #4488ff; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-b    { display:inline-block; background:#222; color:#ff64b4; border:2px solid #ff64b4; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-del  { display:inline-block; background:#222; color:#ff4444; border:2px solid #ff4444; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-dup  { display:inline-block; background:#222; color:#44ffaa; border:2px solid #44ffaa; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-render { display:inline-block; background:#0a1a0a; color:#00ff88; border:2px solid #00ff88; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-mosh { display:inline-block; background:#330033; color:#ff00ff; border:2px solid #ff00ff; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+  .btn-gp   { display:inline-block; background:#222; color:#ffaa00; border:2px solid #ffaa00; border-radius:4px; padding:2px 8px; font-size:0.8em; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<nav>
+  <span>LaMoshPit</span>
+  <a href="#overview">Overview</a>
+  <a href="#signal-flow">Signal Flow</a>
+  <a href="#timeline">Timeline</a>
+  <a href="#frame-ops">Frame Operations</a>
+  <a href="#quick-mosh">Quick Mosh</a>
+  <a href="#mb-editor">MB Editor</a>
+  <a href="#global-params">Global Encode Params</a>
+  <a href="#presets">Global Presets</a>
+  <a href="#relationships">Control Relationships</a>
+  <a href="#workflows">Workflows</a>
+</nav>
+
+<header>
+  <h1>LaMoshPit</h1>
+  <div class="subtitle">User Manual &amp; Control Reference</div>
+  <div class="tagline">Datamoshing &amp; glitch video encoder — every control explained</div>
+</header>
+
+<div class="page">
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="overview">
+<h2>§1 — What LaMoshPit Does</h2>
+
+<p>LaMoshPit is a datamoshing tool. It takes an H.264 video, lets you manipulate its internal encoder parameters at the macroblock and frame level, then <strong>re-encodes</strong> a new H.264 file with those manipulations baked in. The result is opened automatically in the Preview Player for inspection.</p>
+
+<p>Every Apply action <strong>reads the most recently encoded file</strong> and produces a new encoded file. Effects compound across repeated applies — you are always encoding on top of whatever damage the previous pass introduced.</p>
+
+<div class="box key">
+  <div class="box-title">The Golden Rule</div>
+  Each area of the UI maintains its own independent state. Pressing one area's Apply button does <strong>not</strong> read or clear the state of other areas. Understanding what each Apply button actually submits to the encoder is the key to using the app effectively.
+</div>
+
+<h3>The Three Independent Control Areas</h3>
+<div class="grid-3">
+  <div class="card">
+    <h4 class="col-accent">① Quick Mosh</h4>
+    <ul>
+      <li>Choose a named preset</li>
+      <li>Press <span class="btn-mosh">Mosh Now!</span></li>
+      <li>Whole-video effect, auto-runs encode</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4 class="col-pink">② MB Editor</h4>
+    <ul>
+      <li>Paint macroblocks on frame canvas</li>
+      <li>Dial in per-frame/per-MB effects</li>
+      <li>Press <span class="btn-mb">Apply MB Edits</span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4 class="col-orange">③ Global Encode Params</h4>
+    <ul>
+      <li>Set encoder-level settings</li>
+      <li>Choose a named preset</li>
+      <li>Press <span class="btn-gp">Apply Global Params + Re-encode</span></li>
+    </ul>
+  </div>
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="signal-flow">
+<h2>§2 — Signal Flow &amp; What Each Button Sends</h2>
+
+<h3>What Actually Happens on Every Encode</h3>
+<p>All three Apply buttons ultimately call the same internal re-encoder. The difference is <em>which parameters</em> they pass to it.</p>
+
+<div class="box info">
+  <div class="box-title">The Encode Pipeline</div>
+  Input file → Decode (frame by frame) → Pixel manipulation (MB edits) → Re-encode with x264 → Output file → Load in Preview Player
+</div>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Button</th>
+      <th>MB Edits Sent?</th>
+      <th>Global Params Sent?</th>
+      <th>Kill I-Frames?</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="btn-mosh">Mosh Now!</span></td>
+      <td style="color:var(--green)">YES — preset builds a fresh edit map, ignores whatever is in the MB editor</td>
+      <td style="color:var(--orange)">PARTIAL — reads user's Global Params panel, then <strong>forces</strong> <code>killIFrames=true</code> and <code>gopSize=∞</code> on top</td>
+      <td style="color:var(--green)">Always forced ON</td>
+      <td>Also writes the new edit map back into the MB editor so you can see and tweak it afterwards</td>
+    </tr>
+    <tr>
+      <td><span class="btn-mb">Apply MB Edits</span></td>
+      <td style="color:var(--green)">YES — sends every frame that has edits in the MB editor</td>
+      <td style="color:var(--green)">YES — reads current Global Params panel as-is</td>
+      <td>Only if "Kill I-Frames" checkbox is checked</td>
+      <td>Quick Mosh preset state is irrelevant here; only what's painted in the MB editor is used</td>
+    </tr>
+    <tr>
+      <td><span class="btn-gp">Apply Global Params + Re-encode</span></td>
+      <td style="color:var(--red)">NO — no per-frame pixel manipulation, just re-encodes with new codec settings</td>
+      <td style="color:var(--green)">YES — sends all Global Params</td>
+      <td>Only if "Kill I-Frames" checkbox is checked</td>
+      <td>Use this to change GOP structure, QP, or deblocking without adding new pixel damage</td>
+    </tr>
+    <tr>
+      <td><span class="btn-i">Force → I</span> / <span class="btn-p">Force → P</span> / <span class="btn-b">Force → B</span></td>
+      <td style="color:var(--green)">YES — any MB edits are applied to selected frames during re-encode</td>
+      <td style="color:var(--green)">YES — reads current Global Params panel</td>
+      <td>Only if "Kill I-Frames" checkbox is checked</td>
+      <td>Only frames selected in the timeline are converted; unselected frames are re-encoded at whatever type the encoder decides</td>
+    </tr>
+    <tr>
+      <td><span class="btn-del">✖ Delete</span></td>
+      <td style="color:var(--red)">NO — bitstream splice copies compressed packets directly; no pixel manipulation or re-encode occurs</td>
+      <td style="color:var(--red)">NO — no encoder is invoked; Global Params have no effect during a splice</td>
+      <td style="color:var(--red)">Not applicable — no re-encode</td>
+      <td>Selected frames are physically removed from the compressed stream. Surviving P-frames keep their original motion vectors, which now reference content from a different shot → datamosh smear. Requires an I/P-only stream — use Force → P with Kill I-Frames first.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-dup">◁ Dup</span> / <span class="btn-dup">Dup ▷</span></td>
+      <td style="color:var(--green)">YES — MB edits applied before cloning</td>
+      <td style="color:var(--green)">YES</td>
+      <td>Only if "Kill I-Frames" checkbox is checked</td>
+      <td>Each selected frame is output twice; both copies receive MB edits</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <div class="box-title">Quick Mosh Does NOT Read the MB Editor</div>
+  When you press <span class="btn-mosh">Mosh Now!</span>, the preset <strong>replaces</strong> the current edit map entirely. Any frame-specific MB painting you did beforehand will be overwritten in the editor (but was not used in that encode anyway). After Mosh Now! finishes, the MB editor shows the preset's edit map — you can then make adjustments and press <span class="btn-mb">Apply MB Edits</span> to compound effects.
+</div>
+
+<div class="box tip">
+  <div class="box-title">Stacking Workflow</div>
+  Quick Mosh → examine result → tweak specific frames in MB Editor → Apply MB Edits → adjust Global Params → Apply Global Params. Each pass reads the previous result, so damage compounds.
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="timeline">
+<h2>§3 — Timeline &amp; Frame Selection</h2>
+
+<p>The timeline strip at the top of the window shows every frame of the loaded video as a small coloured block. The colour indicates the frame type detected by the H.264 bitstream analyser:</p>
+
+<div class="grid-3">
+  <div class="card">
+    <h4 style="color:#ffffff">White — I-frame (IDR keyframe)</h4>
+    <p style="font-size:0.85em">Intra-coded. Contains a full picture with no reference to other frames. The encoder's reset point. <strong>Datamoshing requires eliminating these</strong> (except frame 0) to maintain a continuous chain of inter-predicted frames.</p>
+  </div>
+  <div class="card">
+    <h4 style="color:#4488ff">Blue — P-frame</h4>
+    <p style="font-size:0.85em">Predicted from a previous frame. Most of the data is motion vectors and residuals relative to the reference. <strong>The datamosh smear lives here.</strong> Corrupting the reference that P-frames point to produces the smear effect.</p>
+  </div>
+  <div class="card">
+    <h4 style="color:#ff64b4">Pink — B-frame</h4>
+    <p style="font-size:0.85em">Predicted from both a past and a future frame. Typically disabled when Kill I-Frames is active, because B-frame adaptive lookahead can re-insert I-frames unexpectedly.</p>
+  </div>
+</div>
+
+<h3>Selecting Frames</h3>
+<ul>
+  <li><strong>Click</strong> a frame to select it. The MB editor canvas loads that frame.</li>
+  <li><strong>Click and drag</strong> across frames to select a range.</li>
+  <li>The selection label below the timeline shows how many frames are selected.</li>
+  <li>The selection feeds the <strong>active range</strong> in the MB editor — any knob change you make writes to all selected frames simultaneously.</li>
+</ul>
+
+<div class="box tip">
+  <div class="box-title">After a successful encode</div>
+  The timeline automatically re-analyses the new file and repaints. If Kill I-Frames worked, you should see only a single white block at frame 0 and all blue from there on.
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="frame-ops">
+<h2>§4 — Frame Operation Buttons</h2>
+
+<p>These buttons above the timeline all trigger a <strong>full re-encode</strong> of the video. They respect the current Global Params panel settings. MB edits are also applied during the re-encode (selected frames get pixel manipulation applied first).</p>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Button</th>
+      <th>What It Does</th>
+      <th>Effect on the Output Video</th>
+      <th>When to Use It</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="btn-i">Force → I</span></td>
+      <td>Re-encodes selected frames as intra-coded keyframes, regardless of what they were originally.</td>
+      <td>Creates hard reset points in the motion chain. The encoder generates a full picture at those positions, wiping any inter-predicted corruption that had accumulated.</td>
+      <td>Rarely useful for datamoshing. Use to punctuate a smear with a sharp clean frame.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-p">Force → P</span></td>
+      <td>Re-encodes selected frames as P-frames (inter-predicted from the frame before). With Kill I-Frames also checked, <em>all</em> frames — selected or not — are forced to P.</td>
+      <td>Breaks the intra cycle. Frame 0 is always kept as IDR (cannot be P — there is no preceding reference). All other frames become motion-compensated predictions, enabling the inter-prediction chain required for datamoshing.</td>
+      <td>Fundamental datamosh setup. Select all frames → Force P → enables smear/freeze effects from MB edits.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-b">Force → B</span></td>
+      <td>Re-encodes selected frames as B-frames (bi-predicted from both a past and future frame).</td>
+      <td>Produces temporal ghosting in both directions. The encoder averages content from before and after the frame, creating a translucent double-exposure look.</td>
+      <td>Atmospheric temporal blur. Combine with high ref-frame count for complex ghosting. Disable Kill I-Frames first — B-frames and infinite GOP can conflict.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-del">✖ Delete</span></td>
+      <td>Physically removes selected frames from the compressed H.264 bitstream using a packet-level splice — <strong>no decode or re-encode takes place</strong>. The surviving compressed P-frames are copied byte-for-byte to the output.</td>
+      <td>Classic datamosh. The surviving P-frames after the cut still contain their original motion vectors, which reference the content of the deleted frames. The decoder applies those vectors to whatever content is now in its reference buffer (the last frame from before the deleted section). This mismatch — wrong reference content, intact motion vectors — produces the smear, bleed-through, and echo artifacts. <strong>Requires an I/P-only stream</strong>; use Force → P with Kill I-Frames ON first.</td>
+      <td>The original datamosh technique. First Force → P all frames (with Kill I-Frames ON), then Delete a range of frames at a scene cut. The P-frames after the cut will inherit motion vectors computed against the deleted content, smearing across the wrong reference shot.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-dup">◁ Dup</span></td>
+      <td>Each selected frame is output twice — the copy appears <em>before</em> the original in the stream.</td>
+      <td>Each frame is encoded twice in sequence. With inter-prediction this creates a stuttered freeze: the encoder references the same content twice, producing skip macroblocks and a hold-frame feel.</td>
+      <td>Stutter / freeze effects. Combine with MB edits on the selected frame for a freeze that transitions into corruption.</td>
+    </tr>
+    <tr>
+      <td><span class="btn-dup">Dup ▷</span></td>
+      <td>Same as Dup Left but the copy appears <em>after</em> the original.</td>
+      <td>Identical to Dup Left but copy order is reversed.</td>
+      <td>When you want the clean version to come first, followed by the repeated/corrupted version.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <div class="box-title">Frame 0 Cannot Be P or B</div>
+  The very first frame of any H.264 video must be an IDR keyframe — the decoder has nothing to reference before it. The app shows a warning and leaves frame 0 untouched if you try to Force P/B on it. This is the one I-frame that <em>should</em> remain.
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="quick-mosh">
+<h2>§5 — Quick Mosh Panel</h2>
+
+<p>Quick Mosh provides one-click whole-video datamosh effects. Each preset encodes a carefully tuned set of frame-level pixel manipulations across the full clip. Pressing <span class="btn-mosh">Mosh Now!</span> always forces <code>Kill I-Frames = ON</code> and <code>GOP Size = ∞</code> — the two non-negotiable prerequisites for datamoshing — regardless of what you have set in the Global Params panel.</p>
+
+<div class="box key">
+  <div class="box-title">Quick Mosh Isolation Rules</div>
+  <ul>
+    <li><strong>Ignores</strong> whatever is currently in the MB editor</li>
+    <li><strong>Overwrites</strong> the MB editor with its own edit map (so you can inspect/modify after)</li>
+    <li><strong>Reads</strong> most of the Global Params panel (ME method, QP settings, deblocking, etc.)</li>
+    <li><strong>Forces</strong> <code>killIFrames = true</code> and <code>gopSize = ∞</code> on top of those params</li>
+  </ul>
+</div>
+
+<h3>Preset Strategies</h3>
+<p>Quick Mosh presets use two strategies:</p>
+<div class="grid-2">
+  <div class="card">
+    <h4 class="col-green">CASCADE (Seed + Propagate)</h4>
+    <p style="font-size:0.85em">Seeds one frame (the first P-frame after the IDR) with pixel manipulations, then automatically generates decaying descendant edits for all subsequent frames. The corruption spreads forward through the inter-prediction chain. The decay is linear — at <code>Decay=50%</code>, the effect is at 100% intensity at frame 1 and 50% intensity at the final frame.</p>
+  </div>
+  <div class="card">
+    <h4 class="col-orange">STAMP ALL (Per-Frame)</h4>
+    <p style="font-size:0.85em">Applies the same manipulation to every single frame independently. No cascade — each frame is stamped with identical pixel changes. Works without a temporal reference chain, so it is effective even on clean source material without needing a long P-frame run.</p>
+  </div>
+</div>
+
+<h3>Preset Reference</h3>
+<div class="preset-grid">
+
+  <div class="preset-card">
+    <div class="pname col-green">Ghost Smear</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Seeds frame 1 with an 80% ghost blend toward the previous frame. The encoder copies content from the preceding frame into each MB, then the cascade propagates this "echo" across the entire clip. Result: a translucent ghost of the opening image drifts over the whole video like a persistent double-exposure.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">MV Liquify →</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Seeds with 70px horizontal MV drift × 3 amplify. Replaces each MB's pixels with content from 210 pixels to the right in the reference frame. The encoder sees this content at the wrong position and uses "wrong" motion vectors, causing horizontal smearing throughout. Result: the image appears to melt or flow rightward.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">MV Liquify ↓</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Same as MV Liquify → but downward. Content drips downward across the full clip. Result: gravity-melt aesthetic, strong on videos with vertical motion.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">Chroma Bleed</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Seeds with independent chroma plane drift (U: +45px, V: −25px) and a DC colour offset. The luma (brightness) channel is left mostly intact while colour planes drift to different positions. Result: VHS-analogue colour bleed where colour separates from luminance, spreading across the clip.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">Vortex</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Combines diagonal MV drift (30px right, −30px up) at 4× amplify with 60-unit noise, 20-unit pixel offset, and a 3-MB spill radius. Multiple effects compound in one seed. Result: chaotic spiral/vortex corruption that radiates outward from the seed frame across the whole clip.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">Scatter Dissolve</div>
+    <div class="ptag">CASCADE · seed frame 1</div>
+    <div class="pdesc">Seeds with reference scatter (25px radius) and sample blur blending. Each MB samples reference content from random nearby offsets instead of the exact position. Result: a shattered-glass or cubist dissolve effect that decays gradually across the video.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">Full Freeze</div>
+    <div class="ptag">CASCADE · seed frame 1 · cascadeDecay=0</div>
+    <div class="pdesc">Seeds with 100% ghost blend and QP=51. Frame 1 becomes a pixel-perfect copy of frame 0. The cascade propagates this at constant intensity with zero decay. Result: the opening frame is frozen for the entire video duration. The encoder outputs skip-MB P-frames with zero residual — the most minimal possible bitstream.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-orange">Pixel Disintegrate</div>
+    <div class="ptag">STAMP ALL · every frame</div>
+    <div class="pdesc">Stamps every frame with heavy noise (±160) and a +30 brightness offset, plus QP=45. No reference dependency. Result: the image is progressively erased into high-QP posterised blocks with heavy grain. The encoder cannot resolve fine detail so large flat colour regions dominate.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-orange">UV Colour Twist</div>
+    <div class="ptag">STAMP ALL · every frame</div>
+    <div class="pdesc">Stamps every frame with independent U/V DC offsets (+50 U, −50 V) and a 30% ghost blend toward the previous frame. Pushes the chroma planes in opposite directions. Result: hue rotates dramatically across the clip — the image takes on a strong tinted cast that pulses with motion.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-orange">Block Melt</div>
+    <div class="ptag">STAMP ALL · every frame</div>
+    <div class="pdesc">Stamps every frame with 80% block flatten (each macroblock's luma is collapsed to its spatial average DC value) and QP=40 plus noise. The encoder receives perfect 16×16 uniform blocks. Result: the image is reduced to coarse mosaic tiles whose colour is the average of the original, with heavy quantisation artefacts at the edges.</div>
+  </div>
+
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="mb-editor">
+<h2>§6 — MB Editor (Macroblock Editor)</h2>
+
+<p>The MB Editor is the most detailed control surface. It lets you paint specific regions of specific frames and apply a rich set of pixel-level effects to exactly those regions. Pressing <span class="btn-mb">Apply MB Edits</span> re-encodes the video applying all those per-frame per-MB manipulations.</p>
+
+<h3>Canvas &amp; Painting</h3>
+<ul>
+  <li>The canvas shows the current frame decoded from the source video. The 16×16 macroblock grid is overlaid.</li>
+  <li><strong>Click or drag</strong> to paint macroblocks. Painted MBs are highlighted.</li>
+  <li><strong>Leave all MBs unpainted = Global Mode.</strong> When no MBs are painted on a frame, the effects apply to every macroblock in that frame.</li>
+  <li>Brush size sets how many MBs are painted per stroke.</li>
+  <li>The Clear button removes all painted MBs from the current frame.</li>
+  <li>Navigate frames using the timeline — the canvas updates to show the selected frame.</li>
+</ul>
+
+<h3>Active Frame Range</h3>
+<p>When you select multiple frames in the timeline (click and drag), knob changes write to <strong>all selected frames simultaneously</strong>. This lets you paint an effect across a whole section without navigating frame by frame.</p>
+
+<div class="box warn">
+  <div class="box-title">Cascade Sliders Do NOT Range-Propagate</div>
+  The Cascade Length and Cascade Decay sliders always write only to the currently-displayed frame, not to the whole selection. This is intentional — setting cascadeLen on every frame in a 300-frame range would turn every frame into a cascade seed, and they would all block each other's descendants.
+</div>
+
+<h3>Knob Reference — MOTION section</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Ref Depth</td>
+      <td class="ctrl-range">0 – 7</td>
+      <td class="ctrl-effect">Which frame in the reference ring buffer to use as the pixel source for MV drift, ghost blend, chroma drift, and scatter. <code>0 = no reference</code> (disables all reference-dependent effects). <code>1 = previous frame</code>. <code>2 = two frames back</code>, etc.</td>
+      <td class="ctrl-result"><strong>Must be ≥ 1 for MV Drift, Ghost Blend, Chroma Drift, or Ref Scatter to have any effect.</strong> Set to 0 and those knobs are silently ignored.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">MV Drift X</td>
+      <td class="ctrl-range">−127 – +127 px</td>
+      <td class="ctrl-effect">Replaces selected MB pixel content with content from the reference frame shifted <em>horizontally</em> by this many pixels (multiplied by MV Amplify). The encoder now sees a frame that looks like it came from a shifted position, so it generates motion vectors pointing there.</td>
+      <td class="ctrl-result">Horizontal smear / liquify. Positive = content appears to slide left; negative = slides right. Requires Ref Depth ≥ 1.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">MV Drift Y</td>
+      <td class="ctrl-range">−127 – +127 px</td>
+      <td class="ctrl-effect">Same as MV Drift X but vertical.</td>
+      <td class="ctrl-result">Vertical smear. Positive = slides up; negative = slides down. Requires Ref Depth ≥ 1.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">MV Amplify</td>
+      <td class="ctrl-range">1 – 8×</td>
+      <td class="ctrl-effect">Multiplies both MV Drift X and MV Drift Y. Effective drift = <code>Drift × Amplify</code>. Amplify=3, DriftX=60 → 180px effective shift.</td>
+      <td class="ctrl-result">Scales the strength of the MV drift effect. High amplify with moderate drift values produces extreme positional shifts without needing large raw drift numbers.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Ghost Blend %</td>
+      <td class="ctrl-range">0 – 100 %</td>
+      <td class="ctrl-effect">Blends selected MB pixels toward the reference frame pixels at the <em>same spatial position</em> (no shift). 100% = completely replace current frame with reference content. 50% = average of current and reference.</td>
+      <td class="ctrl-result">Temporal echo / ghost trail. The previous frame's content bleeds through into the current frame at the selected opacity. At 100% combined with QP=51, the encoder outputs skip-MBs (zero data) — the reference is propagated verbatim. Requires Ref Depth ≥ 1.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Sample Radius</td>
+      <td class="ctrl-range">0 – 8 MB</td>
+      <td class="ctrl-effect">When > 0, the ghost blend samples from a blurred neighbourhood of the reference rather than the exact pixel position. Sample radius in macroblock units (each MB = 16 pixels).</td>
+      <td class="ctrl-result">Makes the ghost softer and more diffuse. At high values the ghost becomes a blurry wash rather than a crisp echo. Requires Ghost Blend > 0 and Ref Depth ≥ 1.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Spill Radius</td>
+      <td class="ctrl-range">0 – 8 MB</td>
+      <td class="ctrl-effect">Expands the painted MB selection outward by this many macroblocks in every direction before applying any effects. Effectively blooms the selected region.</td>
+      <td class="ctrl-result">Widens the zone of effect without repainting. A single painted MB with spill=3 affects a 7×7 MB region. Use to create soft-edged corruption regions.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Knob Reference — NOISE section</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">QP Delta</td>
+      <td class="ctrl-range">−51 – +51</td>
+      <td class="ctrl-effect">Injects a per-MB quantisation parameter offset via the encoder's ROI (Region of Interest) side data. Positive values force higher QP (coarser quantisation, larger DCT coefficient rounding, more information loss). QP=51 is the maximum — all DCT residuals round to zero.</td>
+      <td class="ctrl-result"><strong>Positive QP Delta</strong> = more compression artefacts, blockier image, loss of fine detail in painted MBs. At +51 the encoder outputs <em>skip macroblocks</em> — it cannot add any correction residuals, so only the motion-compensated prediction survives. This is what locks in datamosh corruption. <strong>Negative QP Delta</strong> = higher quality than surrounding areas.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Noise Level</td>
+      <td class="ctrl-range">0 – 255</td>
+      <td class="ctrl-effect">Adds random ±N luma (Y-plane) noise to every pixel in selected MBs before encoding.</td>
+      <td class="ctrl-result">Grain, static, snow. At low values adds subtle film grain. At high values (150+) produces heavy analogue static. The encoder cannot efficiently encode random noise, so it also indirectly increases the apparent QP in those MBs.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Pixel Offset</td>
+      <td class="ctrl-range">−127 – +127</td>
+      <td class="ctrl-effect">Adds a fixed DC offset to all luma pixel values in selected MBs (clamped to 0–255).</td>
+      <td class="ctrl-result">Brightens (positive) or darkens (negative) painted MBs. Combined with QP=51 creates overexposed white patches or underexposed black patches that the encoder can't correct.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Invert Luma %</td>
+      <td class="ctrl-range">0 – 100 %</td>
+      <td class="ctrl-effect">Blends luma pixels toward their inverse (255 − value). 100% = full inversion (photographic negative of brightness).</td>
+      <td class="ctrl-result">Photographic negative effect on painted MBs. Partial inversion produces a grey washed-out look. Confuses the encoder's rate-distortion decisions, often producing artefacts at MB borders.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Knob Reference — CHROMA section</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Chroma Drift X</td>
+      <td class="ctrl-range">−127 – +127 px</td>
+      <td class="ctrl-effect">Shifts the U and V (chroma) planes horizontally by this amount (in half-pixel units for 4:2:0), sampling from the reference frame. Luma is unaffected.</td>
+      <td class="ctrl-result">Colour fringing / chroma aberration — colour bleeds to the left or right of edges while brightness stays in place. VHS colour bleed aesthetic. Requires Ref Depth ≥ 1.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Chroma Drift Y</td>
+      <td class="ctrl-range">−127 – +127 px</td>
+      <td class="ctrl-effect">Same but vertical chroma shift.</td>
+      <td class="ctrl-result">Vertical colour fringing. Combine with X for diagonal chroma bleed.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Chroma Offset</td>
+      <td class="ctrl-range">−127 – +127</td>
+      <td class="ctrl-effect">Adds a fixed DC offset to both U and V chroma planes.</td>
+      <td class="ctrl-result">Shifts the overall hue of painted MBs. Positive = more green/magenta tint (YCbCr space). Combine with Twist U/V for fine hue control.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Twist U</td>
+      <td class="ctrl-range">−127 – +127</td>
+      <td class="ctrl-effect">Adds a DC offset to the U (Cb) chroma plane only.</td>
+      <td class="ctrl-result">Steers hue toward blue (negative) or yellow (positive) independently of V. Use opposite values on U and V for strong hue rotations.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Twist V</td>
+      <td class="ctrl-range">−127 – +127</td>
+      <td class="ctrl-effect">Adds a DC offset to the V (Cr) chroma plane only.</td>
+      <td class="ctrl-result">Steers hue toward cyan/green (negative) or red/magenta (positive).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Knob Reference — PIXEL MANIPULATION section</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Flatten %</td>
+      <td class="ctrl-range">0 – 100 %</td>
+      <td class="ctrl-effect">Blends each macroblock's luma pixels toward the spatial average (DC value) of that MB. 100% = every pixel in the MB becomes the same grey value (the average).</td>
+      <td class="ctrl-result">Block averaging / posterisation. At high values the image resolves into flat colour tiles whose hue is the average of the original. The encoder sees perfectly uniform 16×16 blocks, forcing very coarse quantisation decisions and producing heavy DCT ringing at borders.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Scatter px</td>
+      <td class="ctrl-range">0 – 32 px</td>
+      <td class="ctrl-effect">For each MB, randomly samples a reference frame position within ±scatter pixels of the correct position. The sampled content is written into the current frame.</td>
+      <td class="ctrl-result">Shattered-glass or cubist dissolve. Each MB gets content from a slightly different random location in the reference, breaking spatial coherence. Higher scatter = more fragmented look. Requires Ref Depth ≥ 1.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Transient Envelope — Cascade Controls</h3>
+
+<p>The cascade controls are at the bottom of the MB editor panel. They cause an effect on the <em>current frame</em> to automatically propagate forward in time across subsequent frames with optional decay.</p>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Cascade Length</td>
+      <td class="ctrl-range">0 – 60 frames</td>
+      <td class="ctrl-effect">When > 0, the encoder automatically generates descendant edit entries for the next N frames after the seed frame. Each descendant copies from the immediately-preceding (already-corrupted) frame via Ghost Blend, and applies QP=51 to prevent the encoder from correcting the corruption. Only the current frame's cascade length is set — this control does NOT range-propagate.</td>
+      <td class="ctrl-result">The corruption from the current frame "survives" for N more frames. The datamosh smear persists instead of healing to clean content after one frame. Set to 0 to corrupt only the current frame. Set high for a long sustained smear.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Cascade Decay</td>
+      <td class="ctrl-range">0 – 100 %</td>
+      <td class="ctrl-effect">Controls how much the effect intensity fades over the cascade. Uses a linear fade: at 0% the effect remains at full intensity for all N frames. At 100% the effect fades linearly from full intensity to zero by the final cascade frame. At 50% it fades from 100% to 50% over the cascade length.</td>
+      <td class="ctrl-result">0% = flat sustained smear (think "Full Freeze"). 50% = gentle fade that still produces noticeable corruption at the end. 100% = the smear dissolves completely by the last cascade frame, giving a natural-looking decay. Only the current frame's cascade decay is set.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box tip">
+  <div class="box-title">Cascade Self-Blocking — Important</div>
+  If you set Cascade Length on every frame (e.g. by painting all frames and using the slider), every frame becomes a "seed" and the cascade guard prevents any descendant from being generated (it sees every future frame already occupied). For cascades to work, only <strong>seed frames</strong> should have a non-zero Cascade Length. Descendant frames must be left at zero.
+</div>
+
+<h3>MB Editor Presets</h3>
+
+<p>The Preset dropdown in the MB editor loads a named configuration into all knobs. It writes to every frame in the active timeline selection. Use it to quickly configure a frame or range with a starting point, then fine-tune individual knobs.</p>
+
+<div class="preset-grid">
+  <div class="preset-card">
+    <div class="pname col-green">Ghost Trail</div>
+    <div class="ptag">Ghost Blend 80% · Cascade 40 frames · Decay 50%</div>
+    <div class="pdesc">Strong ghost blend with a 40-frame cascade that fades to 50%. Apply to a seed frame. The corruption carries forward for 40 frames with a gradual fade.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-green">MV Melt →</div>
+    <div class="ptag">MV Drift 60px × 3 · Spill 2 · Cascade 20 frames</div>
+    <div class="pdesc">Horizontal liquify with spill. Seeds a frame with 180px effective drift and cascades for 20 frames. Ref Depth = 1.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-green">Chroma Ghost</div>
+    <div class="ptag">Ghost 40% · Chroma Drift X+35 Y−20 · Offset 15 · Cascade 25</div>
+    <div class="pdesc">Combines chroma drift with ghost blend for colour bleed. VHS-style colour separation that decays over 25 frames.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-orange">Pixel Melt</div>
+    <div class="ptag">QP=51 · Noise 180 · Offset +40 · No cascade</div>
+    <div class="pdesc">Maximum quantisation plus heavy noise and brightness shift. No cascade — stamps each selected frame independently with pure corruption. Strong immediate effect.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-orange">Full Freeze</div>
+    <div class="ptag">QP=51 · Ghost 100% · No cascade</div>
+    <div class="pdesc">Maximum ghost blend — 100% of the previous frame, copied exactly. With QP=51 the encoder cannot add any correction residuals. Apply to a range of frames to freeze them all to the content of the preceding frame. No cascade needed because you stamp each frame directly.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-green">Scatter Wave</div>
+    <div class="ptag">Sample Radius 20 · Ref Scatter 30px · Cascade 30</div>
+    <div class="pdesc">Combines sample blur and scatter for a diffuse dissolve effect. The cascade extends the dissolve across 30 frames with moderate decay.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-orange">UV Colour Twist</div>
+    <div class="ptag">Ghost 30% · Twist U+40 V+40 · Cascade 20</div>
+    <div class="pdesc">Pushes both chroma planes in the same direction, combined with ghost echo. Produces a strong persistent colour cast with a 20-frame cascade.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pname col-green">Vortex</div>
+    <div class="ptag">QP=20 · Ghost 50% · MV 30/−30 × 4 · Noise 60 · Spill 3 · Cascade 35</div>
+    <div class="pdesc">Full compound preset. Diagonal drift, ghost, noise, and spill combined. High-intensity effect with a 35-frame cascade. Strong visual result on almost any content.</div>
+  </div>
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="global-params">
+<h2>§7 — Global Encode Parameters</h2>
+
+<p>These settings control how x264 (the underlying H.264 encoder) makes decisions during every encode pass. They do not add pixel manipulation — they shape the encoder's rate control, motion estimation, frame structure, and quantisation. Press <span class="btn-gp">Apply Global Params + Re-encode</span> to apply them without any MB edits.</p>
+
+<div class="box warn">
+  <div class="box-title">Apply Global Params does NOT apply MB edits</div>
+  This button re-encodes the video using only the encoder settings. No per-frame pixel manipulation is performed. Use it to adjust codec behaviour (e.g. switch to infinite GOP, change deblocking) without adding new corruption.
+</div>
+
+<h3>Kill I-Frames (top checkbox)</h3>
+
+<div class="box key">
+  <div class="box-title">The Most Important Control in the Application</div>
+  <p>When checked, every I-frame in the source (except frame 0) is forced to a P-frame during re-encode. The encoder uses inter-prediction everywhere, maintaining a continuous chain of motion-compensated frames. This is the prerequisite for datamoshing.</p>
+  <p>When Kill I-Frames is active it also <strong>forces GOP Size to ∞</strong> (keyint=9999) regardless of your GOP Size setting. Without this, x264 would insert a mandatory I-frame at every GOP boundary even if all frames are hinted as P, resetting the datamosh chain at regular intervals.</p>
+  <p>B-frames are also disabled when Kill I-Frames is active (<code>bframes=0, b-adapt=0</code>). x264's B-frame lookahead can insert I-frames to anchor the B-frame reference chain, defeating Kill I-Frames.</p>
+</div>
+
+<h3>Frame Structure</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual / Datamosh Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">GOP Size</td>
+      <td class="ctrl-range">−1 / 0 / 1–9999</td>
+      <td class="ctrl-effect">Sets how often the encoder inserts a keyframe. −1 = encoder default (every 250 frames). 0 = infinite (no automatic keyframes ever). Positive = exact frame interval. Note: overridden to 9999 when Kill I-Frames is active.</td>
+      <td class="ctrl-result"><strong>−1:</strong> I-frame every 250 frames — the chain resets periodically. <strong>0 (infinite):</strong> no automatic resets — datamosh smear runs to the end of the clip. Set to 0 for any datamosh work.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">B-Frames</td>
+      <td class="ctrl-range">−1 – 16</td>
+      <td class="ctrl-effect">Maximum number of consecutive B-frames. −1 = encoder default (3). Forced to 0 when Kill I-Frames is on.</td>
+      <td class="ctrl-result">More B-frames → more temporal ghosting from past+future blending. 0 → pure P-chain, more stable datamosh. Higher values with Kill I-Frames off create layered temporal ghost effects.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">B-Adapt</td>
+      <td class="ctrl-range">Off / Fast / Trellis</td>
+      <td class="ctrl-effect">How x264 decides where to insert B-frames. Forced to Off when Kill I-Frames is active. Trellis = full rate-distortion optimal placement.</td>
+      <td class="ctrl-result">Trellis placement produces the "smoothest" B-frame transitions. Off means B-frames are placed at fixed intervals.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Ref Frames</td>
+      <td class="ctrl-range">−1 – 16</td>
+      <td class="ctrl-effect">How many past frames the encoder can reference for motion compensation. −1 = default (3). More refs = encoder searches further back in time.</td>
+      <td class="ctrl-result">Higher ref count → the encoder can copy content from further back in time → longer temporal smear tails. Set to 16 with SmearHeavy preset for maximum temporal bleed.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Rate Control</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">QP Override</td>
+      <td class="ctrl-range">−1 – 51</td>
+      <td class="ctrl-effect">−1 = use CRF 18 (near-lossless rate control). 0–51 = switch to constant-QP mode, forcing every MB to this exact quantiser regardless of content complexity.</td>
+      <td class="ctrl-result"><strong>−1 (CRF 18):</strong> high quality, variable bitrate. <strong>51:</strong> maximum compression, extreme blocking artefacts, near-zero residuals everywhere. Values 30–45 produce visible but variable artefact levels.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">QP Min</td>
+      <td class="ctrl-range">−1 – 51</td>
+      <td class="ctrl-effect">Floor on the quantiser — the encoder cannot use a QP lower than this. −1 = no limit.</td>
+      <td class="ctrl-result">Setting a high QP Min forces a minimum corruption level even on easy-to-encode regions. All frames become at least this damaged.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">QP Max</td>
+      <td class="ctrl-range">−1 – 51</td>
+      <td class="ctrl-effect">Ceiling on the quantiser. −1 = no limit. 51 = the encoder can use maximum quantisation but no higher.</td>
+      <td class="ctrl-result">Setting QP Max to 51 with a high QP Min creates a "forced corruption" floor where the encoder must produce artefacts everywhere. The DataCorrupt preset sets QP Min=36, Max=51.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Motion Estimation</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">ME Method</td>
+      <td class="ctrl-range">Default / dia / hex / umh / esa / tesa</td>
+      <td class="ctrl-effect">The algorithm x264 uses to search for the best motion vector for each MB. <code>dia</code> = diamond search (fast, inaccurate). <code>esa/tesa</code> = exhaustive search (slow, accurate).</td>
+      <td class="ctrl-result"><strong>dia (inaccurate):</strong> the encoder picks wrong motion vectors → content from incorrect reference positions bleeds in → smear, jitter, drift. <strong>esa (accurate):</strong> the encoder correctly compensates for motion → clean result even with large pixel manipulations. Use <code>dia</code> for more datamosh artefacts.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">ME Range</td>
+      <td class="ctrl-range">0 – 512 px</td>
+      <td class="ctrl-effect">How many pixels the encoder searches in each direction when looking for the best reference block. 0 = default.</td>
+      <td class="ctrl-result">Narrow range → encoder gives up searching early → uses wrong MVs → more artefacts. Wide range → finds correct matches over larger distances → cleaner result. Use narrow range to amplify datamosh drift.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Subpel Ref</td>
+      <td class="ctrl-range">−1 – 10</td>
+      <td class="ctrl-effect">Sub-pixel refinement quality. 0 = integer-pixel MVs only. 10 = full quarter-pixel precision. −1 = default.</td>
+      <td class="ctrl-result"><strong>0:</strong> MVs snap to full-pixel boundaries → staircase artefacts at edges, more visible blocking. <strong>10:</strong> smooth sub-pixel compensation → cleaner motion. Use 0 or 1 for gritty, harsh artefact textures.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Partitions &amp; DCT</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Partition Mode</td>
+      <td class="ctrl-range">Default / 16×16 / p8×8 / All / All+4×4</td>
+      <td class="ctrl-effect">Which MB sub-partition sizes the encoder tests when searching for motion vectors. <code>16×16 only</code> = one MV per MB. <code>All+4×4</code> = up to 16 sub-block MVs per MB.</td>
+      <td class="ctrl-result"><strong>16×16 only:</strong> one crude motion vector per block → large blocky artefacts, mosaic look. <strong>All+4×4:</strong> very fine-grained motion → accurate but complex artefacts. The BlockMosaic preset uses 16×16 for the classic tile-glitch aesthetic.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">8×8 DCT</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">Enables 8×8 DCT transform blocks (High profile feature). On = encoder can use both 4×4 and 8×8 transform blocks. Off = 4×4 only.</td>
+      <td class="ctrl-result">Off = lower-frequency DCT capture → slightly softer, more 4×4-block artefact character. On (default) = sharper frequency response.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Quantisation Flags</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Trellis</td>
+      <td class="ctrl-range">Default / Off / Final MB / All MBs</td>
+      <td class="ctrl-effect">Rate-distortion optimal coefficient zeroing after DCT. Off = no trellis, noisy residual selection. All MBs = every MB's DCT coefficients are trellis-optimised.</td>
+      <td class="ctrl-result"><strong>Off:</strong> noisier residuals, more random-looking coefficient patterns, less efficient encoding = different artefact character. <strong>All MBs:</strong> cleanest residuals, most efficient. Use Off for a more "raw" corrupt look.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">No Fast P-Skip</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">Forces the encoder to fully evaluate every MB's residual even when early-termination (fast skip) would normally bail out. Makes encoding slower but more thorough.</td>
+      <td class="ctrl-result">Slightly different artefact distribution — residuals that would have been zeroed by fast skip are now evaluated and possibly retained. Subtle textural difference in corruption patterns.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">No DCT Decimate</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">Normally x264 discards near-zero DCT coefficients. Enabling this preserves them.</td>
+      <td class="ctrl-result">Preserves micro-level frequency information that would normally be thrown away. Produces a finer, more granular noise texture — less blocky, more high-frequency artefact character. Used in QuantumResidue preset.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">CAVLC (no CABAC)</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">Switches the entropy coding stage from CABAC (context-adaptive binary arithmetic coding) to CAVLC (variable-length coding). CAVLC is less efficient.</td>
+      <td class="ctrl-result">Slightly different coefficient distribution in the compressed stream → subtly different artefact character. Lower compression efficiency means more bits used → larger file.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Deblocking Filter</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Disable Loop Filter</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">Turns off the H.264 in-loop deblocking filter that normally smooths 16×16 block boundaries in the reconstruction buffer.</td>
+      <td class="ctrl-result"><strong>Off (disabled):</strong> raw 16×16 macroblock grid becomes visible as a grid of sharp edges. Produces the classic "blocky" compression artefact aesthetic. Essential for block-mosaic looks. All datamosh presets that want hard block edges use this.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Alpha α / Beta β</td>
+      <td class="ctrl-range">−6 – +6</td>
+      <td class="ctrl-effect">Tunes the deblocking filter strength when it is enabled. Alpha controls the edge threshold; Beta controls the flatness threshold. Negative = weaker filter (preserves more edges). Positive = stronger filter (smooths more aggressively).</td>
+      <td class="ctrl-result">Negative values let more block boundary artefacts through even with the filter on. Positive values aggressively smooth even pronounced blocks. Fine-tune the "softness" of artefact edges.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Psychovisual Optimisation</h3>
+
+<table class="ctrl-table">
+  <thead>
+    <tr>
+      <th>Control</th>
+      <th>Range</th>
+      <th>What It Technically Does</th>
+      <th>Visual Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ctrl-name">Psy-RD</td>
+      <td class="ctrl-range">−1 – 5.0</td>
+      <td class="ctrl-effect">Rate-distortion cost that penalises reduction of perceptual detail. −1 = default (1.0). 0 = off (flat energy distribution). High values = encoder adds grain and texture to maintain apparent detail.</td>
+      <td class="ctrl-result"><strong>0:</strong> clean, flat, minimal residuals — less "textured" artefacts. <strong>High (3+):</strong> encoder adds synthetic grain to compensate for information lost to quantisation. Combine with high QP for gritty, organic-looking corruption.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Psy-Trellis</td>
+      <td class="ctrl-range">−1 – 1.0</td>
+      <td class="ctrl-effect">Psychovisual trellis optimisation strength. Adds perceptual bias to the trellis coefficient selection.</td>
+      <td class="ctrl-result">Higher values produce slightly more "alive" textural artefacts at the cost of strict rate control.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">AQ Mode</td>
+      <td class="ctrl-range">Default / Off / Variance / Auto-Var / Auto+Edge</td>
+      <td class="ctrl-effect">Adaptive quantisation — redistributes bits within a frame based on spatial complexity. Off = flat QP across the whole frame. Auto+Edge = prioritises edges and high-detail regions.</td>
+      <td class="ctrl-result"><strong>Off:</strong> flat QP everywhere, more artefacts in complex regions. <strong>Auto+Edge:</strong> allocates more quality to edges, which can interfere with intentional block-edge artefacts. For maximum datamosh destruction, set AQ Off.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">AQ Strength</td>
+      <td class="ctrl-range">−1 – 3.0</td>
+      <td class="ctrl-effect">How aggressively AQ redistributes QP within the frame. −1 = default. Higher = more extreme per-region QP variation.</td>
+      <td class="ctrl-result">High AQ strength with ChromaFever preset creates dramatic per-region quality swings, producing a psychedelic chroma saturation bleed in areas of high spatial variance.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Disable MB-Tree RC</td>
+      <td class="ctrl-range">On / Off</td>
+      <td class="ctrl-effect">MB-Tree is a lookahead rate control that pre-analyses frame propagation to assign more bits to MBs that will be referenced frequently. Disabling removes this intelligence.</td>
+      <td class="ctrl-result">Disabled = more uniform bit allocation regardless of temporal importance. MBs that are rarely referenced get the same treatment as ones referenced many times — less "smart" encoding = different artefact distribution.</td>
+    </tr>
+    <tr>
+      <td class="ctrl-name">Lookahead</td>
+      <td class="ctrl-range">−1 – 250 frames</td>
+      <td class="ctrl-effect">How many frames ahead the encoder looks before deciding quantisation for the current frame. −1 = default. 0 = no lookahead.</td>
+      <td class="ctrl-result">0 = truly blind encoding — the encoder cannot anticipate scene changes or reference patterns. Combined with datamosh parameters, short lookahead creates more unpredictable artefacts.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Spatial Mask</h3>
+
+<p>The Spatial Mask lets you nominate a region (captured from the MB painter canvas) that gets a persistent QP override applied to <em>every single frame</em> of the encode — not just edited frames.</p>
+
+<ul>
+  <li>Paint MBs in the MB editor canvas</li>
+  <li>Click <strong>Capture Current MB Selection</strong> in the Global Params panel</li>
+  <li>Set <strong>Mask QP</strong> (1–51; 51 = force skip MBs in that region on every frame)</li>
+  <li>Press any Apply button — the mask is applied globally throughout the encode</li>
+  <li>Click <strong>Clear Mask</strong> to remove it</li>
+</ul>
+
+<div class="box tip">
+  <div class="box-title">Spatial Mask Use Case</div>
+  Paint a rectangle around the subject's face. Capture it. Set Mask QP=51. Now every encode will maximally corrupt that region on every frame regardless of other MB edits, while the rest of the frame remains at normal quality.
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="presets">
+<h2>§8 — Global Encode Presets</h2>
+
+<p>These presets load a complete set of Global Encode Parameters. Select one from the dropdown at the top of the Global Params panel. They do <strong>not</strong> trigger an encode — they only populate the controls. Press <span class="btn-gp">Apply Global Params + Re-encode</span> afterwards (or any other Apply button to also include MB edits).</p>
+
+<div class="preset-grid">
+
+  <div class="preset-card">
+    <div class="pname col-blue">Default</div>
+    <div class="ptag">No overrides — encoder defaults</div>
+    <div class="pdesc">Resets all Global Params to "no override" state. CRF 18, 3 B-frames, GOP=250, standard ME. Use to start clean.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-blue">Infinite GOP</div>
+    <div class="ptag">Kill I-Frames · GOP=∞ · B-frames off · Ref=4</div>
+    <div class="pdesc">The minimum datamosh setup. Eliminates all automatic I-frames after frame 0. Pure P-chain with 4 reference frames. Apply this before using any MB edits or Quick Mosh for reliable datamoshing.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-accent">Max Datamosh</div>
+    <div class="ptag">Kill I-Frames · GOP=∞ · No deblock · dia ME · No psy · Max QP · No MB-Tree</div>
+    <div class="pdesc">Maximum corruption mode. Inaccurate motion estimation, no deblocking, no psychovisual optimisation, QP ceiling at 51, no MB-Tree lookahead. The encoder makes every possible "wrong" decision. Every pixel manipulation is maximally amplified.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-accent">Smear Heavy</div>
+    <div class="ptag">Kill I-Frames · Ref=16 · No deblock · dia ME · Range 64px · Subpel=1</div>
+    <div class="pdesc">16 reference frames combined with inaccurate ME allows the encoder to blend content from up to 16 frames back in time. Produces extreme temporal smear tails. The "datamosh background" look.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-orange">Glitch Wave</div>
+    <div class="ptag">dia ME · Range 128px · All partitions · Psy-RD 3.0 · Subpel=4</div>
+    <div class="pdesc">Inaccurate wide-range ME with high psychovisual pressure. The encoder searches far but picks wrong matches, then adds synthetic grain. Creates a wavy, distorted look with organic texture.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-orange">Block Mosaic</div>
+    <div class="ptag">16×16 partitions only · No deblock · No subpel · No trellis · dia ME · Range 8px</div>
+    <div class="pdesc">Forces the encoder to use only the crudest 16×16 block operations with no filtering. Result: the classic tile/mosaic compression artefact. Hard edges between 16-pixel blocks are fully exposed.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-pink">Chroma Fever</div>
+    <div class="ptag">AQ Mode Auto+Edge · AQ Strength 3.0 · Psy-RD 1.5 · No deblock · Ref=8</div>
+    <div class="pdesc">Extreme adaptive quantisation with edge bias. Quality swings dramatically between regions, starving flat areas and over-investing in edges. Combined with no deblocking, produces a vivid chroma saturation bleed in high-contrast areas.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-green">Quantum Residue</div>
+    <div class="ptag">No DCT decimate · No fast P-skip · Trellis all MBs · All+4×4 partitions · Subpel=10 · Psy-RD 0.5</div>
+    <div class="pdesc">Maximum residual preservation. Every tiny DCT coefficient is kept, every sub-block is evaluated, full trellis on all MBs. Produces micro-noise textures — fine, high-frequency artefacts rather than large blocks.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-pink">Temporal Bleed</div>
+    <div class="ptag">GOP=∞ · B-frames 8 · B-adapt Trellis · Ref=16 · Weighted pred · Temporal direct</div>
+    <div class="pdesc">Maximum B-frame depth and reference count. Each frame blends from up to 16 past and future frames. Creates a complex layered temporal ghost effect — multiple time points merge into each frame.</div>
+  </div>
+
+  <div class="preset-card">
+    <div class="pname col-red">Data Corrupt</div>
+    <div class="ptag">GOP=∞ · QP 36–51 · No deblock · No fast P-skip · No DCT decimate · No MB-Tree · dia ME · AQ off</div>
+    <div class="pdesc">Forces a QP floor at 36 and ceiling at 51 — every part of every frame is compressed at a high-to-maximum quantiser. Combined with all optimisations disabled, produces heavy uniform block artefacts throughout the clip.</div>
+  </div>
+
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="relationships">
+<h2>§9 — Control Relationships &amp; Dependencies</h2>
+
+<p>Many controls only have an effect when certain other controls are also set correctly. Here is a complete map of interdependencies.</p>
+
+<h3>Reference Chain Dependencies</h3>
+<p>The following MB Editor knobs require <strong>Ref Depth ≥ 1</strong> to have any effect. If Ref Depth is 0, these controls are silently ignored:</p>
+<ul>
+  <li><strong>MV Drift X / Y</strong> — needs a reference frame to shift pixels from</li>
+  <li><strong>MV Amplify</strong> — multiplies Drift X/Y; meaningless if Drift is 0 or ref=0</li>
+  <li><strong>Ghost Blend %</strong> — blends toward reference; needs ref=0 to have a source</li>
+  <li><strong>Sample Radius</strong> — blurs the ghost blend source; requires Ghost Blend > 0 and Ref Depth ≥ 1</li>
+  <li><strong>Chroma Drift X / Y</strong> — shifts chroma from reference; requires Ref Depth ≥ 1</li>
+  <li><strong>Ref Scatter</strong> — samples from random offsets in reference; requires Ref Depth ≥ 1</li>
+</ul>
+
+<div class="box warn">
+  <div class="box-title">Set Ref Depth = 1 for Any Temporal Effect</div>
+  This is the single most common misconfiguration. If your MV drift, ghost blend, or chroma drift seem to do nothing, check that Ref Depth is set to at least 1.
+</div>
+
+<h3>Kill I-Frames Cascade</h3>
+<p>When Kill I-Frames is checked, the following are automatically overridden, regardless of what you have set:</p>
+<ul>
+  <li><strong>GOP Size → 9999 (∞)</strong> — prevents x264's keyint schedule from inserting I-frames at regular intervals</li>
+  <li><strong>B-Frames → 0</strong> — prevents x264's B-frame lookahead from inserting I-frames to anchor B-reference chains</li>
+  <li><strong>B-Adapt → Off</strong> — same reason</li>
+  <li><strong>AV_FRAME_FLAG_KEY cleared</strong> on every non-IDR frame — prevents decoded I-frame key flags from triggering IDR encoding even with pict_type=P set</li>
+</ul>
+
+<h3>QP Delta vs QP Override</h3>
+<ul>
+  <li><strong>QP Delta (MB Editor)</strong> — per-MB relative offset applied via ROI side data. It is <em>added</em> to the frame's base QP. A QP Delta of +30 on a frame with base QP=18 → effective QP ≈ 48 on those MBs.</li>
+  <li><strong>QP Override (Global)</strong> — forces a fixed absolute QP on all MBs across all frames, replacing CRF rate control entirely. QP Override = 51 → QP=51 everywhere, no rate control.</li>
+  <li>Both can be active simultaneously: QP Override sets the base, QP Delta adds on top (clamped to 51).</li>
+</ul>
+
+<h3>Cascade &amp; Propagation</h3>
+<ul>
+  <li><strong>Cascade Length</strong> (MB editor) only generates descendants for frames that do <em>not</em> already have explicit edits. Setting cascadeLen on frame 1 with cascadeLen=50 and all 50 following frames also having explicit edits means the cascade generates nothing — the guard blocks it.</li>
+  <li><strong>Kill I-Frames</strong> must be on for cascade to be effective. Without it, x264 re-inserts I-frames that reset the cascade chain.</li>
+  <li><strong>Cascade only writes to the current frame</strong> in the MB editor — it does not propagate to the active range selection. This is intentional.</li>
+</ul>
+
+<h3>Spill Radius vs Painted MBs</h3>
+<ul>
+  <li>Spill Radius expands the <em>working</em> set of MBs beyond the painted set. The painted MBs are the seed; spill grows the zone of effect outward. A frame in Global Mode (no painted MBs) with Spill Radius set uses all MBs as the base — spill has no additional effect in global mode.</li>
+</ul>
+
+<h3>Quick Mosh vs MB Editor Presets</h3>
+<ul>
+  <li><strong>Quick Mosh presets</strong> — whole-video, always cascade from frame 1 or stamp all frames. Always force Kill I-Frames + infinite GOP.</li>
+  <li><strong>MB Editor presets</strong> — apply to selected frames only (or all frames if all are selected). Use the active range. Do NOT force Kill I-Frames — you must check it yourself in Global Params if needed.</li>
+</ul>
+
+<h3>Spatial Mask vs MB Editor Edits</h3>
+<ul>
+  <li>Both apply QP ROI side data. If a frame has both a MB editor QP Delta and a Spatial Mask active on the same MB, <em>both</em> ROI entries exist — the encoder applies both offsets. The result is additive QP pressure on that MB.</li>
+</ul>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section id="workflows">
+<h2>§10 — Recommended Workflows</h2>
+
+<h3>Workflow A — Classic Datamosh (Delete-Based)</h3>
+
+<div class="box key">
+  <div class="box-title">How This Works</div>
+  Delete uses a <strong>bitstream splice</strong> — it physically removes compressed packets without re-encoding. The surviving P-frames keep their original H.264 motion vectors, which still reference the deleted content. The decoder applies those vectors to the wrong shot's content → smear. This only works on I/P-only streams because B-frames are packets out of display order, which would cause the wrong frames to be removed.
+</div>
+
+<ol>
+  <li>Load a video that has two or more distinct shots (a hard cut works best).</li>
+  <li>In the timeline, select all frames (<strong>click the first frame, then Shift+click the last</strong>).</li>
+  <li>In the Global Params panel, check <strong>Kill I-Frames</strong> and set GOP Size to <code>0</code>.</li>
+  <li>Press <span class="btn-p">Force → P</span>. This re-encodes the video so every frame except frame 0 is a P-frame. The timeline should now show only one white (I) block at frame 0 and all blue thereafter.</li>
+  <li>In the timeline, select the frames you want to remove — typically the frames at or just after a scene cut. These are the frames whose deletion will "break" the motion vector references of the frames that follow.</li>
+  <li>Press <span class="btn-del">✖ Delete</span>. The selected compressed packets are physically removed from the stream. The P-frames after the cut retain their original motion vectors, which now point to content from before the deleted section.</li>
+  <li>Review in the Preview Player. The transition where frames were removed should display a smeary, blocky bleed-through of the previous shot's content. Repeat Delete on different ranges to compound the effect.</li>
+</ol>
+
+<div class="box warn">
+  <div class="box-title">Global Params and MB Edits are not applied during Delete</div>
+  Delete is a packet splice — no encoder is invoked. Kill I-Frames, QP, deblocking and all other encoder settings have no effect on the Delete step itself. Apply those settings via Force → P (step 4) before deleting.
+</div>
+
+<h3>Workflow B — Quick Mosh Then Refine</h3>
+<ol>
+  <li>Load a video.</li>
+  <li>In Quick Mosh, select a preset (e.g. <strong>Vortex</strong>) and press <span class="btn-mosh">Mosh Now!</span>.</li>
+  <li>Wait for the encode. The Preview Player auto-loads the result.</li>
+  <li>The MB editor now contains the preset's edit map. Review it — navigate frames and inspect the knob values.</li>
+  <li>Adjust specific frames: navigate to a frame, change knobs, press <span class="btn-mb">Apply MB Edits</span>. This re-encodes on top of the Quick Mosh result.</li>
+  <li>Try stacking a second Quick Mosh preset on top for compound effects.</li>
+</ol>
+
+<h3>Workflow C — Precision Per-Region Corruption</h3>
+<ol>
+  <li>Load a video. Apply Infinite GOP preset via Global Params.</li>
+  <li>In the MB editor, navigate to the frame you want to corrupt.</li>
+  <li>Paint the specific macroblocks you want to affect (e.g. just the subject's face).</li>
+  <li>Set <strong>QP Delta = 51</strong> and <strong>Ghost Blend = 80%</strong> and <strong>Ref Depth = 1</strong>.</li>
+  <li>Set <strong>Cascade Length = 30</strong> and <strong>Cascade Decay = 30%</strong>.</li>
+  <li>Press <span class="btn-mb">Apply MB Edits</span>.</li>
+  <li>The painted region on that frame — and the next 30 frames — will ghost and freeze while the surrounding image remains clean.</li>
+</ol>
+
+<h3>Workflow D — Global Encoder Artefact Layering</h3>
+<ol>
+  <li>Apply a Quick Mosh preset to get a base layer of corruption.</li>
+  <li>In Global Params, select the <strong>Max Datamosh</strong> or <strong>Block Mosaic</strong> preset.</li>
+  <li>Press <span class="btn-gp">Apply Global Params + Re-encode</span>.</li>
+  <li>The already-corrupted file is now re-encoded with extreme encoder settings, amplifying and reinterpreting the existing artefacts through an additional lens of codec distortion.</li>
+  <li>Repeat steps 2–4 with different presets to layer multiple artefact characters.</li>
+</ol>
+
+<div class="box tip">
+  <div class="box-title">The Compounding Principle</div>
+  LaMoshPit always reads the previously-encoded file as its input. Every Apply is a generational pass — corruption from previous passes is re-encoded through the new settings, often amplifying and transforming the effect unpredictably. Some of the most interesting results come from applying the same preset 3–5 times in a row, or from alternating between very different presets.
+</div>
+
+<h3>Control Debug Logging</h3>
+<p>The <strong>Enable Control Debug Logging</strong> checkbox (green, in Global Params) writes a detailed log of every knob change, MB paint stroke, and frame-parameter state to:</p>
+<ul>
+  <li><code>&lt;app folder&gt;/logs/LaMoshPit_ControlTest_Log.txt</code></li>
+</ul>
+<p>Enable this when diagnosing unexpected results — the log shows exactly which parameters were sent to the encoder for each frame.</p>
+
+<hr>
+
+<p style="color:var(--dim); font-size:0.85em; text-align:center; margin-top:32px;">
+  LaMoshPit — Internal User Manual · All descriptions derived from source code · Mark / LunarBeach
+</p>
+
+</section>
+</div>
+
+</body>
+</html>

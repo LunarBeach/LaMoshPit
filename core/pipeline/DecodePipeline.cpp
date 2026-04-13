@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/rational.h>
+#include <libavutil/display.h>
 }
 
 bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& outputFile)
@@ -57,6 +58,26 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         double input_fps = av_q2d(in_stream->avg_frame_rate);
         qDebug() << "Input video info - FPS:" << input_fps << "Duration:" << ifmt_ctx->duration;
 
+        // Detect display-matrix rotation so portrait videos stay upright.
+        // Use codecpar->coded_side_data (FFmpeg 6.1+ / 7.x API).
+        int rotation = 0;
+        {
+            const AVPacketSideData* sd = av_packet_side_data_get(
+                in_stream->codecpar->coded_side_data,
+                in_stream->codecpar->nb_coded_side_data,
+                AV_PKT_DATA_DISPLAYMATRIX);
+            if (sd && sd->size >= (size_t)(9 * sizeof(int32_t))) {
+                double deg = av_display_rotation_get((const int32_t*)sd->data);
+                if (deg == deg) {  // NaN check
+                    int angle = (int)(deg + 0.5);
+                    angle = ((angle % 360) + 360) % 360;
+                    if (angle == 90 || angle == 270)
+                        rotation = angle;
+                    qDebug() << "Detected display matrix rotation:" << angle << "deg (raw:" << deg << ")";
+                }
+            }
+        }
+
         // 3. Setup Output Context
         avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, outputFile.toUtf8().constData());
         if (!ofmt_ctx) goto cleanup;
@@ -64,10 +85,16 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         // 4. Setup H.264 Encoder - SIMPLIFIED
         const AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
         enc_ctx = avcodec_alloc_context3(encoder);
-        
-        // Copy basic properties
-        enc_ctx->height = dec_ctx->height;
-        enc_ctx->width = dec_ctx->width;
+
+        // Copy basic properties; swap width/height for 90°/270° rotated sources.
+        if (rotation == 90 || rotation == 270) {
+            enc_ctx->width  = dec_ctx->height;
+            enc_ctx->height = dec_ctx->width;
+            qDebug() << "Swapping encoder dims for rotation:" << enc_ctx->width << "x" << enc_ctx->height;
+        } else {
+            enc_ctx->height = dec_ctx->height;
+            enc_ctx->width  = dec_ctx->width;
+        }
         enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
         enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
         
@@ -128,8 +155,51 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                 if (avcodec_send_packet(dec_ctx, pkt) == 0) {
                     // Receive decoded frames
                     while (avcodec_receive_frame(dec_ctx, frame) == 0) {
+                        // If the source has a 90° or 270° display-matrix rotation,
+                        // physically transpose the YUV420P frame planes so the
+                        // encoded output has the correct portrait orientation.
+                        AVFrame* sendFrame = frame;
+                        AVFrame* rotated   = nullptr;
+                        if (rotation == 90 || rotation == 270) {
+                            rotated = av_frame_alloc();
+                            rotated->format = AV_PIX_FMT_YUV420P;
+                            rotated->width  = enc_ctx->width;
+                            rotated->height = enc_ctx->height;
+                            av_frame_get_buffer(rotated, 0);
+                            av_frame_copy_props(rotated, frame);
+                            int srcW = frame->width, srcH = frame->height;
+                            if (rotation == 90) {
+                                // 90° CW: src(row,col) → dst(col, srcH-1-row)
+                                for (int r = 0; r < srcH; r++)
+                                    for (int c = 0; c < srcW; c++)
+                                        rotated->data[0][c * rotated->linesize[0] + (srcH - 1 - r)] =
+                                            frame->data[0][r * frame->linesize[0] + c];
+                                for (int r = 0; r < srcH / 2; r++)
+                                    for (int c = 0; c < srcW / 2; c++) {
+                                        rotated->data[1][c * rotated->linesize[1] + (srcH/2 - 1 - r)] =
+                                            frame->data[1][r * frame->linesize[1] + c];
+                                        rotated->data[2][c * rotated->linesize[2] + (srcH/2 - 1 - r)] =
+                                            frame->data[2][r * frame->linesize[2] + c];
+                                    }
+                            } else { // 270° CW = 90° CCW
+                                // 270° CW: src(row,col) → dst(srcW-1-col, row)
+                                for (int r = 0; r < srcH; r++)
+                                    for (int c = 0; c < srcW; c++)
+                                        rotated->data[0][(srcW - 1 - c) * rotated->linesize[0] + r] =
+                                            frame->data[0][r * frame->linesize[0] + c];
+                                for (int r = 0; r < srcH / 2; r++)
+                                    for (int c = 0; c < srcW / 2; c++) {
+                                        rotated->data[1][(srcW/2 - 1 - c) * rotated->linesize[1] + r] =
+                                            frame->data[1][r * frame->linesize[1] + c];
+                                        rotated->data[2][(srcW/2 - 1 - c) * rotated->linesize[2] + r] =
+                                            frame->data[2][r * frame->linesize[2] + c];
+                                    }
+                            }
+                            sendFrame = rotated;
+                        }
+
                         // Send frame to encoder with preserved timing
-                        if (avcodec_send_frame(enc_ctx, frame) == 0) {
+                        if (avcodec_send_frame(enc_ctx, sendFrame) == 0) {
                             AVPacket *enc_pkt = av_packet_alloc();
                             // Receive encoded packets
                             while (avcodec_receive_packet(enc_ctx, enc_pkt) == 0) {
@@ -140,6 +210,7 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                             }
                             av_packet_free(&enc_pkt);
                         }
+                        if (rotated) av_frame_free(&rotated);
                     }
                 }
             }

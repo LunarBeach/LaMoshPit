@@ -23,6 +23,8 @@ PreviewPlayer::PreviewPlayer(QWidget *parent)
     , m_stopButton(nullptr)
     , m_nextFrameButton(nullptr)
     , m_prevFrameButton(nullptr)
+    , m_loopButton(nullptr)
+    , m_popOutButton(nullptr)
     , m_positionSlider(nullptr)
     , m_duration(0)
 {
@@ -66,10 +68,19 @@ void PreviewPlayer::setupUI()
     
     m_prevFrameButton = new QPushButton("⏮ Prev Frame", this);
     m_prevFrameButton->setEnabled(false);
-    
+
     m_nextFrameButton = new QPushButton("Next Frame ⏭", this);
     m_nextFrameButton->setEnabled(false);
-    
+
+    m_loopButton = new QPushButton("Loop", this);
+    m_loopButton->setCheckable(true);
+    m_loopButton->setChecked(false);
+    m_loopButton->setToolTip("Loop: replay the video continuously when it ends");
+
+    m_popOutButton = new QPushButton("\u2922", this);  // ⤢
+    m_popOutButton->setFixedSize(28, 28);
+    m_popOutButton->setToolTip("Pop preview out to a floating window (dual-monitor)");
+
     // Position slider
     m_positionSlider = new QSlider(Qt::Horizontal, this);
     m_positionSlider->setRange(0, 0);
@@ -80,6 +91,9 @@ void PreviewPlayer::setupUI()
     buttonLayout->addWidget(m_playButton);
     buttonLayout->addWidget(m_stopButton);
     buttonLayout->addWidget(m_nextFrameButton);
+    buttonLayout->addWidget(m_loopButton);
+    buttonLayout->addStretch(1);
+    buttonLayout->addWidget(m_popOutButton);
     
     // Slider layout
     auto *sliderLayout = new QHBoxLayout;
@@ -98,6 +112,12 @@ void PreviewPlayer::setupUI()
     connect(m_nextFrameButton, &QPushButton::clicked, this, &PreviewPlayer::nextFrame);
     connect(m_prevFrameButton, &QPushButton::clicked, this, &PreviewPlayer::previousFrame);
     connect(m_positionSlider, &QSlider::sliderMoved, this, &PreviewPlayer::onSliderMoved);
+
+    connect(m_loopButton, &QPushButton::toggled, this, [this](bool on) {
+        m_mediaPlayer->setLoops(on ? QMediaPlayer::Infinite : 1);
+    });
+
+    connect(m_popOutButton, &QPushButton::clicked, this, &PreviewPlayer::popOutRequested);
 }
 
 void PreviewPlayer::unloadVideo()

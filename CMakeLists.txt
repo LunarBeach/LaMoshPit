@@ -31,6 +31,7 @@ qt_standard_project_setup()
 
 add_executable(LeeAnnesMoshPit WIN32
     main.cpp
+    resources.qrc
     gui/MainWindow.cpp
     gui/BitstreamAnalyzer.cpp
     gui/widgets/TimelineWidget.cpp
@@ -40,6 +41,7 @@ add_executable(LeeAnnesMoshPit WIN32
     gui/widgets/PropertyPanel.cpp
     gui/widgets/BitstreamTestWidget.cpp
     gui/widgets/QuickMoshWidget.cpp
+    gui/widgets/ToggleSwitch.cpp
     core/pipeline/DecodePipeline.cpp
     core/transform/FrameTransformer.cpp
     core/logger/ControlLogger.cpp

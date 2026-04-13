@@ -4,9 +4,11 @@
 
 #include <QPainter>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScrollArea>
+#include <QSplitter>
 #include <QPushButton>
 #include <QLabel>
 #include <QDial>
@@ -324,11 +326,44 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     root->setContentsMargins(4, 4, 4, 4);
     root->setSpacing(4);
 
-    // ── Canvas ──────────────────────────────────────────────────────────────
+    // ── Canvas ───────────────────────────────────────────────────────────────
     m_canvas = new MBCanvas(this);
-    root->addWidget(m_canvas, 1);
     connect(m_canvas, &MBCanvas::selectionChanged,
             this, &MacroblockWidget::onMBSelectionChanged);
+
+    m_canvasScroll = new QScrollArea(this);
+    m_canvasScroll->setWidget(m_canvas);
+    m_canvasScroll->setWidgetResizable(false);  // we manage canvas size directly
+    m_canvasScroll->setStyleSheet(
+        "QScrollArea { border:none; background:#111; }"
+        "QScrollBar:vertical   { background:#1a1a1a; width:8px;  border:none; }"
+        "QScrollBar:horizontal { background:#1a1a1a; height:8px; border:none; }"
+        "QScrollBar::handle:vertical, QScrollBar::handle:horizontal "
+        "  { background:#333; border-radius:4px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
+        "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width:0; height:0; }");
+    // eventFilter: viewport resize → sync canvas size; canvas wheel → zoom
+    m_canvasScroll->viewport()->installEventFilter(this);
+    m_canvas->installEventFilter(this);
+
+    // ── Inner splitter: canvas (top, draggable) | controls (bottom) ──────────
+    m_innerSplitter = new QSplitter(Qt::Vertical, this);
+    m_innerSplitter->setChildrenCollapsible(false);
+    m_innerSplitter->setHandleWidth(5);
+    m_innerSplitter->setStyleSheet(
+        "QSplitter::handle:vertical { background:#2a2a2a; border-top:1px solid #333; }");
+
+    auto* controlsWidget = new QWidget(this);
+    controlsWidget->setMinimumHeight(80);
+    auto* controlsLayout = new QVBoxLayout(controlsWidget);
+    controlsLayout->setContentsMargins(0, 4, 0, 0);
+    controlsLayout->setSpacing(4);
+
+    m_innerSplitter->addWidget(m_canvasScroll);
+    m_innerSplitter->addWidget(controlsWidget);
+    m_innerSplitter->setStretchFactor(0, 3);
+    m_innerSplitter->setStretchFactor(1, 1);
+    root->addWidget(m_innerSplitter, 1);
 
     // ── Navigation row ───────────────────────────────────────────────────────
     auto* navRow = new QHBoxLayout;
@@ -343,13 +378,75 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     m_btnNext->setStyleSheet(kDarkBtn);
     m_btnPrev->setEnabled(false);
     m_btnNext->setEnabled(false);
+    m_btnPopOutCanvas = new QPushButton("\u2922", this);  // ⤢
+    m_btnPopOutCanvas->setFixedSize(28, 28);
+    m_btnPopOutCanvas->setToolTip("Pop canvas out to a floating window");
+    m_btnPopOutCanvas->setStyleSheet(kDarkBtn);
+    m_btnPopOutCanvas->setEnabled(false);
     navRow->addWidget(m_btnPrev);
     navRow->addWidget(m_navLabel, 1);
     navRow->addWidget(m_btnNext);
-    root->addLayout(navRow);
+    navRow->addWidget(m_btnPopOutCanvas);
+    controlsLayout->addLayout(navRow);
 
     connect(m_btnPrev, &QPushButton::clicked, this, &MacroblockWidget::onPrev);
     connect(m_btnNext, &QPushButton::clicked, this, &MacroblockWidget::onNext);
+    connect(m_btnPopOutCanvas, &QPushButton::clicked, this, [this]() {
+        if (m_canvasIsPopped) {
+            m_innerSplitter->insertWidget(0, m_canvasScroll);
+            m_canvasScroll->show();
+            m_btnPopOutCanvas->setText("\u2922");
+            m_canvasIsPopped = false;
+        } else {
+            m_canvasScroll->setParent(nullptr);
+            m_canvasScroll->setWindowTitle("MB Canvas \u2014 LaMoshPit");
+            m_canvasScroll->setAttribute(Qt::WA_DeleteOnClose, false);
+            m_canvasScroll->installEventFilter(this);
+            m_canvasScroll->resize(700, 500);
+            m_canvasScroll->show();
+            m_btnPopOutCanvas->setText("\u2921");  // ⤡ (dock-back icon)
+            m_canvasIsPopped = true;
+        }
+    });
+
+    // ── Zoom row ─────────────────────────────────────────────────────────────
+    {
+        auto* zoomRow = new QHBoxLayout;
+        auto* zoomLbl = new QLabel("Zoom:", this);
+        zoomLbl->setStyleSheet("color:#555; font:7pt 'Consolas'; background:transparent;");
+        zoomLbl->setFixedWidth(42);
+        zoomRow->addWidget(zoomLbl);
+
+        m_sliderZoom = new QSlider(Qt::Horizontal, this);
+        m_sliderZoom->setRange(100, 500);   // 1.0× .. 5.0× (×100)
+        m_sliderZoom->setValue(100);
+        m_sliderZoom->setEnabled(false);
+        m_sliderZoom->setToolTip("Zoom the MB canvas. Scroll wheel on the canvas also zooms.");
+        m_sliderZoom->setStyleSheet(
+            "QSlider::groove:horizontal { background:#1e1e1e; height:5px; border-radius:2px; }"
+            "QSlider::handle:horizontal { background:#444; width:12px; height:12px; "
+            "  margin:-4px 0; border-radius:6px; }"
+            "QSlider::sub-page:horizontal { background:#444; border-radius:2px; }"
+            "QSlider:disabled::handle:horizontal { background:#2a2a2a; }"
+            "QSlider:disabled::sub-page:horizontal { background:#1e1e1e; }");
+        zoomRow->addWidget(m_sliderZoom, 1);
+
+        m_lblZoom = new QLabel("1.0\u00d7", this);
+        m_lblZoom->setStyleSheet("color:#555; font:7pt 'Consolas'; background:transparent;");
+        m_lblZoom->setFixedWidth(36);
+        m_lblZoom->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        zoomRow->addWidget(m_lblZoom);
+
+        controlsLayout->addLayout(zoomRow);
+
+        connect(m_sliderZoom, &QSlider::valueChanged, this, [this](int v) {
+            m_zoom = v / 100.0f;
+            m_lblZoom->setText(QString::number(m_zoom, 'f', 1) + "\u00d7");
+            QSize vpSize = m_canvasScroll->viewport()->size();
+            m_canvas->resize(QSize(qRound(vpSize.width()  * m_zoom),
+                                   qRound(vpSize.height() * m_zoom)));
+        });
+    }
 
     // ── Knob helper lambda ────────────────────────────────────────────────────
     // Creates a vertical label/dial/spinbox stack.  Registers in m_allDials /
@@ -409,117 +506,143 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         return grp;
     };
 
-    // ── Group separator helper ─────────────────────────────────────────────────
-    auto makeSep = [](const QString& title, QWidget* parent) -> QWidget* {
-        auto* w  = new QWidget(parent);
-        auto* hb = new QHBoxLayout(w);
-        hb->setContentsMargins(2, 6, 2, 0);
-        auto* lbl = new QLabel(title, w);
-        lbl->setStyleSheet(
-            "QLabel { color:#555; font:bold 7pt 'Consolas'; "
-            "border-bottom:1px solid #2e2e2e; padding-bottom:2px; }");
-        hb->addWidget(lbl);
-        return w;
-    };
-
     // ── Knob container (scrollable) ────────────────────────────────────────────
     auto* knobContainer = new QWidget;
     knobContainer->setStyleSheet("background:#111;");
     auto* kvb = new QVBoxLayout(knobContainer);
-    kvb->setContentsMargins(4, 4, 4, 8);
-    kvb->setSpacing(2);
+    kvb->setContentsMargins(0, 0, 0, 4);
+    kvb->setSpacing(0);
+
+    // ── Collapsible section helper ─────────────────────────────────────────────
+    // Returns the content widget and its row layout.  The toggle button and
+    // content widget are already added to kvb when the struct is returned.
+    struct Section { QWidget* w; QHBoxLayout* l; };
+    static const QString kSecBtn =
+        "QPushButton { background:#171717; color:#555; font:bold 7pt 'Consolas'; "
+        "  text-align:left; border:none; border-bottom:1px solid #222; padding:3px 6px; }"
+        "QPushButton:hover { background:#1e1e1e; color:#888; }";
+
+    auto makeSection = [&](const QString& title) -> Section {
+        auto* btn = new QPushButton(knobContainer);
+        btn->setCheckable(true);
+        btn->setChecked(true);
+        btn->setFlat(true);
+        btn->setText("\u25bc " + title);
+        btn->setStyleSheet(kSecBtn);
+        btn->setCursor(Qt::PointingHandCursor);
+        kvb->addWidget(btn);
+
+        auto* content = new QWidget(knobContainer);
+        content->setStyleSheet("background:#111;");
+        auto* row = new QHBoxLayout(content);
+        row->setContentsMargins(2, 2, 2, 4);
+        row->setSpacing(4);
+        kvb->addWidget(content);
+
+        QString t = title;
+        connect(btn, &QPushButton::toggled, content, [btn, content, t](bool on) {
+            content->setVisible(on);
+            btn->setText((on ? "\u25bc " : "\u25ba ") + t);
+        });
+        return {content, row};
+    };
 
     // QUANTIZATION
-    kvb->addWidget(makeSep("\u2500\u2500 QUANTIZATION", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("QP \u0394", -51, 51, m_dialQP, m_sbQP, knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 QUANTIZATION");
+        s.l->addWidget(makeKnob("QP \u0394", -51, 51, m_dialQP, m_sbQP, s.w));
+        s.l->addStretch(1);
     }
 
     // TEMPORAL / REFERENCE
-    kvb->addWidget(makeSep("\u2500\u2500 TEMPORAL / REFERENCE", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("Ref Depth",  0, 7,    m_dialRef,   m_sbRef,   knobContainer));
-        row->addWidget(makeKnob("Ghost Blend",0, 100,  m_dialGhost, m_sbGhost, knobContainer));
-        row->addWidget(makeKnob("MV\u2192X", -128, 128,m_dialMVX,  m_sbMVX,   knobContainer));
-        row->addWidget(makeKnob("MV\u2192Y", -128, 128,m_dialMVY,  m_sbMVY,   knobContainer));
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 TEMPORAL / REFERENCE");
+        s.l->addWidget(makeKnob("Ref Depth",   0,   7,   m_dialRef,   m_sbRef,   s.w));
+        s.l->addWidget(makeKnob("Ghost Blend", 0, 100,   m_dialGhost, m_sbGhost, s.w));
+        s.l->addWidget(makeKnob("MV\u2192X", -128, 128,  m_dialMVX,   m_sbMVX,   s.w));
+        s.l->addWidget(makeKnob("MV\u2192Y", -128, 128,  m_dialMVY,   m_sbMVY,   s.w));
+        s.l->addStretch(1);
     }
 
     // LUMA CORRUPTION
-    kvb->addWidget(makeSep("\u2500\u2500 LUMA CORRUPTION", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("Noise",     0, 255,   m_dialNoise,  m_sbNoise,  knobContainer));
-        row->addWidget(makeKnob("Px Offset",-128, 127, m_dialPxOff,  m_sbPxOff,  knobContainer));
-        row->addWidget(makeKnob("Invert %",  0, 100,   m_dialInvert, m_sbInvert, knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 LUMA CORRUPTION");
+        s.l->addWidget(makeKnob("Noise",      0,  255,  m_dialNoise,  m_sbNoise,  s.w));
+        s.l->addWidget(makeKnob("Px Offset", -128, 127, m_dialPxOff,  m_sbPxOff,  s.w));
+        s.l->addWidget(makeKnob("Invert %",   0,  100,  m_dialInvert, m_sbInvert, s.w));
+        s.l->addStretch(1);
     }
 
     // CHROMA CORRUPTION
-    kvb->addWidget(makeSep("\u2500\u2500 CHROMA CORRUPTION", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("Chr\u2192X", -128, 128, m_dialChrX,   m_sbChrX,   knobContainer));
-        row->addWidget(makeKnob("Chr\u2192Y", -128, 128, m_dialChrY,   m_sbChrY,   knobContainer));
-        row->addWidget(makeKnob("Chr Offset",-128, 127,  m_dialChrOff, m_sbChrOff, knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 CHROMA CORRUPTION");
+        s.l->addWidget(makeKnob("Chr\u2192X",  -128, 128, m_dialChrX,   m_sbChrX,   s.w));
+        s.l->addWidget(makeKnob("Chr\u2192Y",  -128, 128, m_dialChrY,   m_sbChrY,   s.w));
+        s.l->addWidget(makeKnob("Chr Offset",  -128, 127, m_dialChrOff, m_sbChrOff, s.w));
+        s.l->addStretch(1);
     }
 
     // SPATIAL INFLUENCE
-    kvb->addWidget(makeSep("\u2500\u2500 SPATIAL INFLUENCE", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("Spill Out",   0, 8, m_dialSpill,        m_sbSpill,        knobContainer));
-        row->addWidget(makeKnob("Sample In",   0, 8, m_dialSampleRadius, m_sbSampleRadius, knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
-        // Tooltip hint via label is enough; QDial doesn't show tooltips well
+        auto s = makeSection("\u2500\u2500 SPATIAL INFLUENCE");
+        s.l->addWidget(makeKnob("Spill Out", 0, 8, m_dialSpill,        m_sbSpill,        s.w));
+        s.l->addWidget(makeKnob("Sample In", 0, 8, m_dialSampleRadius, m_sbSampleRadius, s.w));
+        s.l->addStretch(1);
     }
 
-    // AMPLIFY
-    kvb->addWidget(makeSep("\u2500\u2500 MV AMPLIFY", knobContainer));
+    // MV AMPLIFY
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("MV Amplify", 1, 16, m_dialMVAmp, m_sbMVAmp, knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 MV AMPLIFY");
+        s.l->addWidget(makeKnob("MV Amplify", 1, 16, m_dialMVAmp, m_sbMVAmp, s.w));
+        s.l->addStretch(1);
     }
 
     // PIXEL MANIPULATION
-    kvb->addWidget(makeSep("\u2500\u2500 PIXEL MANIPULATION", knobContainer));
     {
-        auto* row = new QHBoxLayout;
-        row->addWidget(makeKnob("Flatten %",   0, 100, m_dialBlockFlatten, m_sbBlockFlatten, knobContainer));
-        row->addWidget(makeKnob("Scatter px",  0,  32, m_dialRefScatter,   m_sbRefScatter,   knobContainer));
-        row->addWidget(makeKnob("Twist U",  -127, 127, m_dialColorTwistU,  m_sbColorTwistU,  knobContainer));
-        row->addWidget(makeKnob("Twist V",  -127, 127, m_dialColorTwistV,  m_sbColorTwistV,  knobContainer));
-        row->addStretch(1);
-        kvb->addLayout(row);
+        auto s = makeSection("\u2500\u2500 PIXEL MANIPULATION");
+        s.l->addWidget(makeKnob("Flatten %",   0, 100,  m_dialBlockFlatten, m_sbBlockFlatten, s.w));
+        s.l->addWidget(makeKnob("Scatter px",  0,  32,  m_dialRefScatter,   m_sbRefScatter,   s.w));
+        s.l->addWidget(makeKnob("Twist U",   -127, 127, m_dialColorTwistU,  m_sbColorTwistU,  s.w));
+        s.l->addWidget(makeKnob("Twist V",   -127, 127, m_dialColorTwistV,  m_sbColorTwistV,  s.w));
+        s.l->addStretch(1);
     }
 
     kvb->addStretch(1);
 
-    // ── TRANSIENT ENVELOPE — prominent sliders above the knob scroll area ───
-    // Controls how effects smoothly return to zero over time on subsequent frames.
-    // Length: how many frames the effect persists (= cascadeLen).
-    // Decay:  shape of the fade-out curve (= cascadeDecay).  0=flat sustained,
-    //         100=exponential halving each frame (sharp initial drop).
+    // ── TRANSIENT ENVELOPE — collapsible panel above the knob scroll area ───
+    // Length: how many frames the cascade persists (cascadeLen, max = total frames − 1).
+    // Decay:  0=flat sustained, 100=sharp exponential fade.
     {
         auto* transPanel = new QWidget(this);
         transPanel->setStyleSheet("background:#141414; border-top:1px solid #2a2a2a;");
         auto* tv = new QVBoxLayout(transPanel);
-        tv->setContentsMargins(6, 4, 6, 4);
-        tv->setSpacing(4);
+        tv->setContentsMargins(0, 0, 0, 0);
+        tv->setSpacing(0);
 
-        auto* hdr = new QLabel("\u2500\u2500 TRANSIENT ENVELOPE", transPanel);
-        hdr->setStyleSheet("color:#44ffaa; font:bold 7pt 'Consolas'; border:none;");
-        tv->addWidget(hdr);
+        auto* transHdr = new QPushButton("\u25bc \u2500\u2500 TRANSIENT ENVELOPE", transPanel);
+        transHdr->setCheckable(true);
+        transHdr->setChecked(true);
+        transHdr->setFlat(true);
+        transHdr->setStyleSheet(
+            "QPushButton { background:#141414; color:#44ffaa; font:bold 7pt 'Consolas'; "
+            "  text-align:left; border:none; border-bottom:1px solid #222; padding:3px 6px; }"
+            "QPushButton:hover { background:#1c1c1c; }");
+        transHdr->setCursor(Qt::PointingHandCursor);
+        tv->addWidget(transHdr);
+
+        auto* transContent = new QWidget(transPanel);
+        transContent->setStyleSheet("background:#141414;");
+        auto* tcv = new QVBoxLayout(transContent);
+        tcv->setContentsMargins(6, 4, 6, 4);
+        tcv->setSpacing(4);
+        tv->addWidget(transContent);
+
+        connect(transHdr, &QPushButton::toggled, transContent,
+                [transHdr, transContent](bool on) {
+            transContent->setVisible(on);
+            transHdr->setText((on ? "\u25bc " : "\u25ba ")
+                              + QString("\u2500\u2500 TRANSIENT ENVELOPE"));
+        });
 
         // Helper: one slider row
         auto makeSliderRow = [&](const QString& lbl, int lo, int hi,
@@ -536,12 +659,10 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
             slOut->setValue(lo);
             slOut->setEnabled(false);
             slOut->setStyleSheet(
-                "QSlider::groove:horizontal { background:#222; height:6px; "
-                "  border-radius:3px; }"
+                "QSlider::groove:horizontal { background:#222; height:6px; border-radius:3px; }"
                 "QSlider::handle:horizontal { background:#44ffaa; width:14px; "
                 "  height:14px; margin:-4px 0; border-radius:7px; }"
-                "QSlider::sub-page:horizontal { background:#44ffaa; "
-                "  border-radius:3px; }"
+                "QSlider::sub-page:horizontal { background:#44ffaa; border-radius:3px; }"
                 "QSlider:disabled::handle:horizontal { background:#444; }"
                 "QSlider:disabled::sub-page:horizontal { background:#2a2a2a; }");
             row->addWidget(slOut, 1);
@@ -550,22 +671,21 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
             lblOut->setStyleSheet("color:#44ffaa; font:bold 7pt 'Consolas'; min-width:60px;");
             lblOut->setFixedWidth(60);
             row->addWidget(lblOut);
-            tv->addLayout(row);
+            tcv->addLayout(row);
         };
 
-        makeSliderRow("Length",     0, 60,  m_sliderTransLen,   m_lblTransLen,
-                      " frames", transPanel);
-        makeSliderRow("Decay",      0, 100, m_sliderTransDecay, m_lblTransDecay,
-                      "%",       transPanel);
+        makeSliderRow("Length",  0, 60,  m_sliderTransLen,   m_lblTransLen,
+                      " frames", transContent);
+        makeSliderRow("Decay",   0, 100, m_sliderTransDecay, m_lblTransDecay,
+                      "%",       transContent);
 
-        root->addWidget(transPanel);
+        controlsLayout->addWidget(transPanel);
     }
 
     auto* scrollArea = new QScrollArea(this);
     scrollArea->setWidget(knobContainer);
     scrollArea->setWidgetResizable(true);
-    scrollArea->setMaximumHeight(290);
-    scrollArea->setMinimumHeight(110);
+    scrollArea->setMinimumHeight(80);
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setStyleSheet(
@@ -573,7 +693,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         "QScrollBar:vertical { background:#1a1a1a; width:8px; border:none; }"
         "QScrollBar::handle:vertical { background:#444; border-radius:4px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }");
-    root->addWidget(scrollArea);
+    controlsLayout->addWidget(scrollArea);
 
     // ── Connect all knobs (dial + spinbox) to m_edits via member pointer ────────
     // Both dial AND spinbox trigger the same field update; the sync lambdas inside
@@ -690,7 +810,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     presetRow->setSpacing(6);
     presetRow->addWidget(presetLabel);
     presetRow->addWidget(presetCombo, 1);
-    root->addLayout(presetRow);
+    controlsLayout->addLayout(presetRow);
 
     connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this, presetCombo](int idx) {
@@ -753,15 +873,32 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     ctrlRow->setSpacing(6);
 
     auto* brushLabel = new QLabel("Brush:", this);
-    brushLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
-    m_sbBrush = new QSpinBox(this);
-    m_sbBrush->setRange(1, 16);
-    m_sbBrush->setValue(1);
-    m_sbBrush->setFixedWidth(50);
-    m_sbBrush->setStyleSheet(
-        "QSpinBox { background:#1a1a1a; color:#ccc; border:1px solid #444; "
-        "font:8pt 'Consolas'; }");
-    m_sbBrush->setEnabled(false);
+    brushLabel->setStyleSheet("color:#888; font:7pt 'Consolas';");
+    brushLabel->setFixedWidth(38);
+    ctrlRow->addWidget(brushLabel);
+
+    m_sliderBrush = new QSlider(Qt::Horizontal, this);
+    m_sliderBrush->setRange(1, 16);
+    m_sliderBrush->setValue(1);
+    m_sliderBrush->setEnabled(false);
+    m_sliderBrush->setFixedWidth(90);
+    m_sliderBrush->setToolTip("Brush size: number of MBs painted per stroke");
+    m_sliderBrush->setStyleSheet(
+        "QSlider::groove:horizontal { background:#1e1e1e; height:5px; border-radius:2px; }"
+        "QSlider::handle:horizontal { background:#888; width:12px; height:12px; "
+        "  margin:-4px 0; border-radius:6px; }"
+        "QSlider::sub-page:horizontal { background:#555; border-radius:2px; }"
+        "QSlider:disabled::handle:horizontal { background:#333; }"
+        "QSlider:disabled::sub-page:horizontal { background:#1e1e1e; }");
+    ctrlRow->addWidget(m_sliderBrush);
+
+    m_lblBrush = new QLabel("1", this);
+    m_lblBrush->setStyleSheet("color:#888; font:7pt 'Consolas'; background:transparent;");
+    m_lblBrush->setFixedWidth(18);
+    m_lblBrush->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    ctrlRow->addWidget(m_lblBrush);
+
+    ctrlRow->addStretch(1);
 
     m_btnClearFrame = new QPushButton("Clear Frame", this);
     m_btnClearAll   = new QPushButton("Clear All",   this);
@@ -770,15 +907,14 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     m_btnClearFrame->setEnabled(false);
     m_btnClearAll  ->setEnabled(false);
 
-    ctrlRow->addWidget(brushLabel);
-    ctrlRow->addWidget(m_sbBrush);
-    ctrlRow->addStretch(1);
     ctrlRow->addWidget(m_btnClearFrame);
     ctrlRow->addWidget(m_btnClearAll);
-    root->addLayout(ctrlRow);
+    controlsLayout->addLayout(ctrlRow);
 
-    connect(m_sbBrush, QOverload<int>::of(&QSpinBox::valueChanged),
-            m_canvas, &MBCanvas::setBrushSize);
+    connect(m_sliderBrush, &QSlider::valueChanged, m_canvas, &MBCanvas::setBrushSize);
+    connect(m_sliderBrush, &QSlider::valueChanged, this, [this](int v) {
+        m_lblBrush->setText(QString::number(v));
+    });
     connect(m_btnClearFrame, &QPushButton::clicked,
             this, &MacroblockWidget::onClearFrame);
     connect(m_btnClearAll, &QPushButton::clicked,
@@ -823,6 +959,17 @@ void MacroblockWidget::setVideo(const QString& videoPath,
         m_mbRows = (report.sps.frame_height_px + 15) / 16;
     }
 
+    // Cascade length max = number of frames that can follow the seed frame.
+    m_sliderTransLen->setMaximum(qMax(1, m_totalFrames - 1));
+
+    // Reset zoom to fit-to-canvas on new video load.
+    m_zoom = 1.0f;
+    { QSignalBlocker zb(m_sliderZoom);
+      m_sliderZoom->setValue(100); }
+    m_lblZoom->setText("1.0\u00d7");
+    { QSize vpSize = m_canvasScroll->viewport()->size();
+      if (!vpSize.isEmpty()) m_canvas->resize(vpSize); }
+
     if (m_totalFrames > 0 && m_mbCols > 0) {
         setControlsEnabled(true);
         navigateTo(0);
@@ -853,6 +1000,13 @@ void MacroblockWidget::reload(const QString& videoPath,
         m_mbCols = (report.sps.frame_width_px  + 15) / 16;
         m_mbRows = (report.sps.frame_height_px + 15) / 16;
     }
+
+    // Keep cascade length max in sync with (potentially reduced) frame count.
+    m_sliderTransLen->setMaximum(qMax(1, m_totalFrames - 1));
+    // Clamp any existing cascadeLen values that now exceed the new max.
+    int newMax = m_sliderTransLen->maximum();
+    for (auto it = m_edits.begin(); it != m_edits.end(); ++it)
+        it->cascadeLen = qMin(it->cascadeLen, newMax);
 
     if (m_totalFrames > 0 && m_mbCols > 0) {
         setControlsEnabled(true);
@@ -1033,15 +1187,60 @@ void MacroblockWidget::updateNavLabel()
 
 void MacroblockWidget::setControlsEnabled(bool enabled)
 {
-    m_btnPrev        ->setEnabled(enabled);
-    m_btnNext        ->setEnabled(enabled);
-    m_sbBrush        ->setEnabled(enabled);
-    m_btnClearFrame  ->setEnabled(enabled);
-    m_btnClearAll    ->setEnabled(enabled);
-    m_sliderTransLen ->setEnabled(enabled);
+    m_btnPrev           ->setEnabled(enabled);
+    m_btnNext           ->setEnabled(enabled);
+    m_btnPopOutCanvas   ->setEnabled(enabled);
+    m_sliderBrush       ->setEnabled(enabled);
+    m_sliderZoom        ->setEnabled(enabled);
+    m_btnClearFrame   ->setEnabled(enabled);
+    m_btnClearAll     ->setEnabled(enabled);
+    m_sliderTransLen  ->setEnabled(enabled);
     m_sliderTransDecay->setEnabled(enabled);
     for (QDial*    d : m_allDials)     d->setEnabled(enabled);
     for (QSpinBox* s : m_allSpinboxes) s->setEnabled(enabled);
+}
+
+// =============================================================================
+// eventFilter — handles viewport resize (canvas size sync) + canvas wheel (zoom)
+//               + canvas pop-out window close (re-dock).
+// =============================================================================
+bool MacroblockWidget::eventFilter(QObject* obj, QEvent* e)
+{
+    // ── Viewport resized: keep canvas at zoom × viewport size ────────────────
+    if (obj == m_canvasScroll->viewport() && e->type() == QEvent::Resize) {
+        QSize vpSize = m_canvasScroll->viewport()->size();
+        m_canvas->resize(QSize(qRound(vpSize.width()  * m_zoom),
+                               qRound(vpSize.height() * m_zoom)));
+        return false; // let the event propagate normally
+    }
+    // ── Canvas wheel: zoom in/out ─────────────────────────────────────────────
+    if (obj == m_canvas && e->type() == QEvent::Wheel) {
+        auto* we = static_cast<QWheelEvent*>(e);
+        float factor = (we->angleDelta().y() > 0) ? 1.25f : (1.0f / 1.25f);
+        float newZoom = qBound(1.0f, m_zoom * factor, 5.0f);
+        if (!qFuzzyCompare(newZoom, m_zoom)) {
+            m_zoom = newZoom;
+            QSignalBlocker sb(m_sliderZoom);
+            m_sliderZoom->setValue(qRound(m_zoom * 100.0f));
+            m_lblZoom->setText(QString::number(m_zoom, 'f', 1) + "\u00d7");
+            QSize vpSize = m_canvasScroll->viewport()->size();
+            m_canvas->resize(QSize(qRound(vpSize.width()  * m_zoom),
+                                   qRound(vpSize.height() * m_zoom)));
+        }
+        we->accept();
+        return true; // consume — do not scroll the viewport
+    }
+    // ── Pop-out window closed: re-dock canvas into splitter ───────────────────
+    if (obj == m_canvasScroll && e->type() == QEvent::Close) {
+        m_innerSplitter->insertWidget(0, m_canvasScroll);
+        m_canvasScroll->show();
+        if (m_btnPopOutCanvas) {
+            m_btnPopOutCanvas->setText("\u2922");
+        }
+        m_canvasIsPopped = false;
+        return true; // suppress the close; widget is now re-docked
+    }
+    return QWidget::eventFilter(obj, e);
 }
 
 #include "MacroblockWidget.moc"
