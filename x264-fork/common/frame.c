@@ -327,6 +327,9 @@ void x264_frame_delete( x264_frame_t *frame )
         /* LaMoshPit-Edge: free cbp_override if a callback was provided. */
         if( frame->cbp_override_free )
             frame->cbp_override_free( frame->cbp_override );
+        /* LaMoshPit-Edge: free mb_skip_override if a callback was provided. */
+        if( frame->mb_skip_override_free )
+            frame->mb_skip_override_free( frame->mb_skip_override );
         if( frame->extra_sei.sei_free )
         {
             for( int i = 0; i < frame->extra_sei.num_payloads; i++ )
@@ -414,6 +417,9 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
      * encoder's perspective (no per-MB state tracking required). */
     dst->cbp_override = src->prop.cbp_override;
     dst->cbp_override_free = src->prop.cbp_override_free;
+    /* LaMoshPit-Edge: copy force-skip override pointer. */
+    dst->mb_skip_override = src->prop.mb_skip_override;
+    dst->mb_skip_override_free = src->prop.mb_skip_override_free;
 
     uint8_t *pix[3];
     int stride[3];
