@@ -2930,6 +2930,34 @@ void x264_macroblock_analyse( x264_t *h )
         h->fdec->effective_qp[h->mb.i_mb_xy] = h->mb.i_qp; /* Store the real analysis QP. */
     mb_analyse_init( h, &analysis, h->mb.i_qp );
 
+    /* LaMoshPit-Edge Force Skip override: bypass RD analysis entirely and
+     * emit this MB as a skip. For P-slices → P_SKIP, for B-slices → B_SKIP.
+     * On I-slices the override is silently ignored (skip macroblocks do not
+     * exist for I-slices in H.264).
+     *
+     * The skip MB has no residual, no explicit MV bits (inherits predicted
+     * skip MV), and ref_idx=0. This is the strongest "frozen prediction"
+     * datamosh guarantee — even stronger than CBP Zero since motion vector
+     * bits are also suppressed. */
+    if( h->fdec->mb_skip_override && h->fdec->mb_skip_override[h->mb.i_mb_xy] )
+    {
+        if( h->sh.i_type == SLICE_TYPE_P )
+        {
+            h->mb.i_type = P_SKIP;
+            h->mb.i_partition = D_16x16;
+            /* Zero MVs for future predictors (matches natural skip behaviour) */
+            for( int i = 0; i < h->mb.pic.i_fref[0]; i++ )
+                M32( h->mb.mvr[0][i][h->mb.i_mb_xy] ) = 0;
+            return;
+        }
+        else if( h->sh.i_type == SLICE_TYPE_B )
+        {
+            h->mb.i_type = B_SKIP;
+            return;
+        }
+        /* SLICE_TYPE_I: fall through — no skip MBs exist for I-slices. */
+    }
+
     /*--------------------------- Do the analysis ---------------------------*/
     if( h->sh.i_type == SLICE_TYPE_I )
     {
