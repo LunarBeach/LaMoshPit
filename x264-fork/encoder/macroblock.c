@@ -942,6 +942,24 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
     else
         h->mb.i_cbp_chroma = 0;
 
+    /* LaMoshPit-Edge CBP override: force CBP=0 on flagged MBs.
+     *
+     * Zeroing i_cbp_luma and i_cbp_chroma here suppresses all residual emission
+     * in the CAVLC/CABAC writers further down the pipeline — their residual
+     * block writes are gated by these fields (see encoder/cavlc.c line ~573
+     * and encoder/cabac.c line ~978).
+     *
+     * This also feeds into the auto-skip logic below: if after zeroing CBP
+     * the MV happens to match the predicted skip MV AND ref_idx=0, x264 will
+     * naturally convert this MB to P_SKIP or B_SKIP — the cleanest possible
+     * "frozen prediction" datamosh effect, achieved entirely by x264's own
+     * existing code paths. */
+    if( h->fdec->cbp_override && h->fdec->cbp_override[h->mb.i_mb_xy] )
+    {
+        h->mb.i_cbp_luma = 0;
+        h->mb.i_cbp_chroma = 0;
+    }
+
     /* store cbp */
     int cbp = h->mb.i_cbp_chroma << 4 | h->mb.i_cbp_luma;
     if( h->param.b_cabac )
