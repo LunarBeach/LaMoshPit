@@ -1260,6 +1260,34 @@ static void mb_analyse_inter_p16x16( x264_t *h, x264_mb_analysis_t *a )
     int i_halfpel_thresh = INT_MAX;
     int *p_halfpel_thresh = (a->b_early_terminate && h->mb.pic.i_fref[0]>1) ? &i_halfpel_thresh : NULL;
 
+    /* LaMoshPit-Edge MVD Injection override.
+     * When the user has flagged this MB via mvd_active_override, skip the
+     * motion search entirely and write the user-specified MV directly into
+     * the analysis result.  Reference index is forced to 0.
+     *
+     * MV units are quarter-pel (x264's internal representation).  Values
+     * from the public API are int16_t, giving a range sufficient for any
+     * practical per-MB MV injection.
+     *
+     * Caveats: this is a minimal implementation — it populates me16x16 only,
+     * which covers the most common datamosh case.  Sub-partition MV override
+     * (me16x8, me8x16, me8x8) is future work. */
+    if( h->fdec->mvd_active_override
+        && h->fdec->mvd_active_override[h->mb.i_mb_xy]
+        && h->fdec->mvd_x_override
+        && h->fdec->mvd_y_override )
+    {
+        int mb_xy = h->mb.i_mb_xy;
+        a->l0.me16x16.cost     = 1; /* non-MAX so this MV is picked */
+        a->l0.me16x16.i_ref    = 0;
+        a->l0.me16x16.mv[0]    = h->fdec->mvd_x_override[mb_xy];
+        a->l0.me16x16.mv[1]    = h->fdec->mvd_y_override[mb_xy];
+        a->l0.i_rd16x16        = COST_MAX;
+        h->mb.i_type           = P_L0;
+        h->mb.i_partition      = D_16x16;
+        return;
+    }
+
     /* 16x16 Search on all ref frame */
     m.i_pixel = PIXEL_16x16;
     LOAD_FENC( &m, h->mb.pic.p_fenc, 0, 0 );
@@ -2977,6 +3005,39 @@ intra_analysis:
 
         else if( analysis.i_mbrd >= 2 )
             intra_rd_refine( h, &analysis );
+
+        /* LaMoshPit-Edge Force MB Type override (I-slice path).
+         * After the RD comparison has selected the cheapest intra type, the
+         * user may force a specific type. mb_analyse_intra above has already
+         * populated prediction data for all three intra types, so switching
+         * h->mb.i_type here is safe — the selected type's prediction data is
+         * still available downstream.
+         *
+         * Values: 1 = I_16x16, 2 = I_4x4, 3 = I_8x8.  Other values ignored. */
+        if( h->fdec->mb_type_override && h->fdec->mb_type_override[h->mb.i_mb_xy] )
+        {
+            uint8_t forced = h->fdec->mb_type_override[h->mb.i_mb_xy];
+            if     ( forced == 1 ) h->mb.i_type = I_16x16;
+            else if( forced == 2 ) h->mb.i_type = I_4x4;
+            else if( forced == 3 ) h->mb.i_type = I_8x8;
+            /* 4 (P_L0) and 5 (P_8x8) are meaningless on I-slices; ignore. */
+        }
+
+        /* LaMoshPit-Edge Force Intra Mode override.
+         * When the MB is actually being encoded as I_16x16 (either naturally
+         * or via mb_type_override above), override the selected prediction
+         * mode with the user-specified value. Values 0..3 correspond to:
+         *   0 = Vertical, 1 = Horizontal, 2 = DC, 3 = Plane.
+         * For non-I_16x16 types, this override has no effect (extending to
+         * per-block I_4x4/I_8x8 prediction modes is future work). */
+        if( h->mb.i_type == I_16x16
+            && h->fdec->intra_mode_override
+            && h->fdec->intra_mode_override[h->mb.i_mb_xy] >= 0
+            && h->fdec->intra_mode_override[h->mb.i_mb_xy] <= 3 )
+        {
+            h->mb.i_intra16x16_pred_mode = h->fdec->intra_mode_override[h->mb.i_mb_xy];
+            analysis.i_predict16x16 = h->fdec->intra_mode_override[h->mb.i_mb_xy];
+        }
     }
     else if( h->sh.i_type == SLICE_TYPE_P )
     {
