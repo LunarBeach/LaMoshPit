@@ -3124,6 +3124,15 @@ cont:
             h->fdec->mb_info = NULL;
             h->fdec->mb_info_free = NULL;
         }
+
+        /* LaMoshPit-Edge: free the CBP override buffer after the last thread is
+         * done reading it. Mirrors the mb_info free logic above. */
+        if( h->fdec->cbp_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->cbp_override_free( h->fdec->cbp_override );
+            h->fdec->cbp_override = NULL;
+            h->fdec->cbp_override_free = NULL;
+        }
     }
 
     return 0;
@@ -3563,6 +3572,14 @@ int     x264_encoder_encode( x264_t *h,
     h->fdec->mb_info_free = h->fenc->mb_info_free;
     h->fenc->mb_info = NULL;
     h->fenc->mb_info_free = NULL;
+
+    /* LaMoshPit-Edge: hand off the per-MB CBP override pointer to fdec so it
+     * is accessible from inside x264_macroblock_encode (which reads h->fdec).
+     * NULL out the fenc side to avoid double-free. */
+    h->fdec->cbp_override = h->fenc->cbp_override;
+    h->fdec->cbp_override_free = h->fenc->cbp_override_free;
+    h->fenc->cbp_override = NULL;
+    h->fenc->cbp_override_free = NULL;
 
     h->fdec->i_pts = h->fenc->i_pts;
     if( h->frames.i_bframe_delay )
