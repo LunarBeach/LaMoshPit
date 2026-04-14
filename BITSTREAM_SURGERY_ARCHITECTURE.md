@@ -234,29 +234,50 @@ counterpart in ~2.1 minutes. The installed `x264.h` contains our
 
 ### 4.2 Implemented hooks
 
-| Knob       | x264 hook location                            | Status      |
-| ---------- | --------------------------------------------- | ----------- |
-| CBP Zero   | `encoder/macroblock.c` `macroblock_encode_internal` | ✅ Implemented |
-| Force Skip | `encoder/analyse.c` `x264_macroblock_analyse` entry | ✅ Implemented |
+| Knob              | x264 hook location                                       | Status | Notes                                                       |
+| ----------------- | -------------------------------------------------------- | :----: | ----------------------------------------------------------- |
+| CBP Zero          | `encoder/macroblock.c` `macroblock_encode_internal`      |   ✅   | Zeros i_cbp_luma/chroma; residual emission fully suppressed |
+| Force Skip        | `encoder/analyse.c` top of `x264_macroblock_analyse`     |   ✅   | P→P_SKIP, B→B_SKIP, I-slice ignored                         |
+| Force MB Type     | `encoder/analyse.c` after I-slice RD selection           |   ✅   | I-slice only for now; P-slice is future work                |
+| Force Intra Mode  | `encoder/analyse.c` after I-slice type override          |   ✅   | I_16x16 mode only; per-block I_4x4/I_8x8 modes are future   |
+| MVD Injection     | `encoder/analyse.c` top of `mb_analyse_inter_p16x16`     |   ✅   | 16x16 partition only; sub-partitions are future             |
+| DCT Scale         | `encoder/macroblock.c` before CBP commit                 |   ✅   | Scales post-quant coefficients uniformly                    |
 
 ---
 
-## 5. Remaining hooks (roadmap)
+## 5. Status: all six hooks active
 
-The six bitstream-surgery knobs in the MB Editor each need their own encoder
-hook. In suggested implementation order (easiest → hardest):
+All six bitstream-surgery hooks are implemented and built into libx264.lib.
+The full public API is in `vcpkg/installed/x64-windows/include/x264.h` — look
+for the `// LaMoshPit-Edge extension` comment blocks in `x264_image_properties_t`.
 
-| # | Knob              | Hook location(s)                                         | Approach                                                   |
-| - | ----------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
-| 1 | **CBP Zero**      | `encoder/macroblock.c` after residual                    | ✅ Done                                                    |
-| 2 | **Force Skip**    | `encoder/analyse.c` top of `x264_macroblock_analyse`     | ✅ Done — P-slices → P_SKIP, B-slices → B_SKIP, I-slices ignore |
-| 3 | **Force MB Type** | `encoder/analyse.c` before RD search                     | Short-circuit RD; map user enum (0=Skip, 1=I16x16, ...) to x264 type constants |
-| 4 | **Force Intra Mode** | `encoder/analyse.c::analyse_intra_*` per block       | Override `h->mb.cache.intra4x4_pred_mode[n]` / `i_chroma_pred_mode` per block |
-| 5 | **MVD Injection** | `encoder/analyse.c::mb_analyse_inter_*`                  | Bypass motion search; write exact MVD into `h->mb.cache.mv[0][x264_scan8[0]]` |
-| 6 | **DCT Scale**     | `encoder/macroblock.c::macroblock_encode_internal` before quantization | Scale `dct4x4[]` coefficients by `bsDctScale/100` before `quant_4x4` |
+| Public API field          | Knob                   | Type/semantics                                        |
+| ------------------------- | ---------------------- | ----------------------------------------------------- |
+| `cbp_override`            | CBP Zero               | uint8_t array, non-zero = force CBP=0                 |
+| `mb_skip_override`        | Force Skip             | uint8_t array, non-zero = force skip (P/B only)       |
+| `mb_type_override`        | Force MB Type          | uint8_t array, 1=I16x16, 2=I4x4, 3=I8x8, 4=P_L0, 5=P_8x8 |
+| `intra_mode_override`     | Force Intra Mode       | int8_t array, -1=none, 0-3=V/H/DC/Plane               |
+| `mvd_x_override` + `mvd_y_override` + `mvd_active_override` | MVD Injection | int16_t arrays (q-pel) + uint8_t enable flag |
+| `dct_scale_override`      | DCT Scale              | uint8_t array, 255=none, 0-200=percent scale          |
 
-Each follows the same 5-touchpoint pattern established by CBP Zero (API field,
-internal mirror, frame propagation, fenc→fdec handoff, and the hook).
+### Known limitations (future work markers)
+
+These are intentional simplifications, not bugs. They are documented in code
+comments at each hook site and may be expanded later if the corresponding MB
+Editor knobs grow in scope.
+
+- **Force MB Type on P-slices**: Only I-slice path is currently implemented.
+  Forcing specific P-slice types requires deeper integration with x264's
+  inter-vs-intra RD decision path.
+- **Force Intra Mode for I_4x4 / I_8x8**: Currently overrides only I_16x16
+  prediction mode. Per-block (16 blocks × 4x4, or 4 blocks × 8x8) override
+  would need arrays indexed differently.
+- **Force Intra Mode for chroma**: Luma only. Chroma prediction mode
+  override is a separate field we haven't added.
+- **MVD Injection sub-partitions**: Covers 16x16 partition only. 16x8, 8x16,
+  and 8x8 sub-partition MV override is future work.
+- **DCT Scale selective**: Scales all coefficients uniformly. Per-block
+  (e.g., only AC, only DC, only specific 8x8) is future work.
 
 ---
 
@@ -308,6 +329,7 @@ library.
 **Current port-version history:**
 - `port-version: 1` → CBP Zero hook only
 - `port-version: 2` → CBP Zero + Force Skip hooks
+- `port-version: 3` → All 6 hooks active (CBP Zero, Force Skip, Force MB Type, Force Intra Mode, MVD Injection, DCT Scale)
 
 ### 6.4 x264 baseline choice
 
