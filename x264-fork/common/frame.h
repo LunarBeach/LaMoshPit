@@ -177,6 +177,11 @@ typedef struct x264_frame
     uint8_t *mb_info;
     void (*mb_info_free)( void* );
 
+    /* LaMoshPit-Edge extension: per-MB CBP override array.
+     * Mirrors x264_image_properties_t.cbp_override. */
+    uint8_t *cbp_override;
+    void (*cbp_override_free)( void* );
+
 #if HAVE_OPENCL
     x264_frame_opencl_t opencl;
 #endif
