@@ -237,6 +237,7 @@ counterpart in ~2.1 minutes. The installed `x264.h` contains our
 | Knob       | x264 hook location                            | Status      |
 | ---------- | --------------------------------------------- | ----------- |
 | CBP Zero   | `encoder/macroblock.c` `macroblock_encode_internal` | ✅ Implemented |
+| Force Skip | `encoder/analyse.c` `x264_macroblock_analyse` entry | ✅ Implemented |
 
 ---
 
@@ -248,7 +249,7 @@ hook. In suggested implementation order (easiest → hardest):
 | # | Knob              | Hook location(s)                                         | Approach                                                   |
 | - | ----------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
 | 1 | **CBP Zero**      | `encoder/macroblock.c` after residual                    | ✅ Done                                                    |
-| 2 | **Force Skip**    | `encoder/analyse.c` before MB-type selection             | Force `h->mb.i_type = P_SKIP` (or B_SKIP); zero MVD       |
+| 2 | **Force Skip**    | `encoder/analyse.c` top of `x264_macroblock_analyse`     | ✅ Done — P-slices → P_SKIP, B-slices → B_SKIP, I-slices ignore |
 | 3 | **Force MB Type** | `encoder/analyse.c` before RD search                     | Short-circuit RD; map user enum (0=Skip, 1=I16x16, ...) to x264 type constants |
 | 4 | **Force Intra Mode** | `encoder/analyse.c::analyse_intra_*` per block       | Override `h->mb.cache.intra4x4_pred_mode[n]` / `i_chroma_pred_mode` per block |
 | 5 | **MVD Injection** | `encoder/analyse.c::mb_analyse_inter_*`                  | Bypass motion search; write exact MVD into `h->mb.cache.mv[0][x264_scan8[0]]` |
@@ -283,7 +284,32 @@ Files:
 First build: ~2.1 minutes (provisions MSYS2, NASM, autoconf, automake, etc.).
 Subsequent builds: ~20-60 seconds thanks to vcpkg's binary cache.
 
-### 6.3 x264 baseline choice
+### 6.3 Rebuilding after modifying x264 source (IMPORTANT)
+
+vcpkg computes its binary-cache ABI hash from the **portfile contents and package
+metadata** — NOT from the source tree contents. When you add new encoder hooks
+to `x264-fork/` without touching the portfile, vcpkg sees no change and silently
+restores the previous cached build. Your modifications won't be in the installed
+library.
+
+**Protocol for adding a new hook:**
+
+1. Make your `x264-fork/` source changes, commit them.
+2. **Bump `port-version` in `vcpkg-overlay-ports/x264-lamoshpit/vcpkg.json`**
+   (e.g. from `2` to `3`). Commit that separately with a message like
+   `"vcpkg overlay: bump port-version to 3 (FooBar hook added)"`.
+3. Remove the cached build and reinstall:
+   ```powershell
+   ./vcpkg/vcpkg.exe remove x264-lamoshpit --overlay-ports=./vcpkg-overlay-ports --triplet=x64-windows
+   ./vcpkg/vcpkg.exe install x264-lamoshpit --overlay-ports=./vcpkg-overlay-ports --triplet=x64-windows
+   ```
+4. Verify your new field appears in `vcpkg/installed/x64-windows/include/x264.h`.
+
+**Current port-version history:**
+- `port-version: 1` → CBP Zero hook only
+- `port-version: 2` → CBP Zero + Force Skip hooks
+
+### 6.4 x264 baseline choice
 
 We vendored x264 at commit `31e19f92f00c7003fa115047ce50978bc98c3a0d`
 (`"ppc: Fix compilation on unknown OS"`) specifically because it's the commit
