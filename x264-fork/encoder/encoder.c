@@ -3133,6 +3133,15 @@ cont:
             h->fdec->cbp_override = NULL;
             h->fdec->cbp_override_free = NULL;
         }
+
+        /* LaMoshPit-Edge: free the force-skip override buffer after the last
+         * thread is done reading it. Same lifecycle as cbp_override. */
+        if( h->fdec->mb_skip_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->mb_skip_override_free( h->fdec->mb_skip_override );
+            h->fdec->mb_skip_override = NULL;
+            h->fdec->mb_skip_override_free = NULL;
+        }
     }
 
     return 0;
@@ -3580,6 +3589,13 @@ int     x264_encoder_encode( x264_t *h,
     h->fdec->cbp_override_free = h->fenc->cbp_override_free;
     h->fenc->cbp_override = NULL;
     h->fenc->cbp_override_free = NULL;
+
+    /* LaMoshPit-Edge: hand off the per-MB force-skip override to fdec so the
+     * MB analyser can read it via h->fdec->mb_skip_override[mb_xy]. */
+    h->fdec->mb_skip_override = h->fenc->mb_skip_override;
+    h->fdec->mb_skip_override_free = h->fenc->mb_skip_override_free;
+    h->fenc->mb_skip_override = NULL;
+    h->fenc->mb_skip_override_free = NULL;
 
     h->fdec->i_pts = h->fenc->i_pts;
     if( h->frames.i_bframe_delay )
