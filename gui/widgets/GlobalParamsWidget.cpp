@@ -321,11 +321,37 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
     }
 
     // ── PARTITIONS & DCT ─────────────────────────────────────────────────────
+    //
+    // Three dropdowns — one per H.264 slice type — controlling which partition
+    // subdivisions x264 is allowed to emit.  Each dropdown maps to a subset of
+    // x264's --partitions flag bits:
+    //
+    //   I-frame MB Type → i4x4, i8x8  (intra partitions; note these also govern
+    //                     the minority of intra MBs that appear in P/B frames)
+    //   P-frame MB Type → p8x8, p4x4  (P-slice inter partitions; p4x4 implies p8x8)
+    //   B-frame MB Type → b8x8        (B-slice bi-directional inter partitions;
+    //                     H.264 has no b4x4 so only two options for B)
+    //
+    // Dropdown index → GlobalEncodeParams value (index − 1):
+    //   0 Default      → -1  (use x264's natural default for this frame type)
+    //   1 16×16 only   →  0  (no subdivision for this frame type)
+    //   2 +8×8         →  1  (one level of subdivision)
+    //   3 +8×8 +4×4    →  2  (full subdivision — I and P only)
+    //
+    // NOTE: Force Skip (MB Editor, per-MB) ALWAYS takes precedence on flagged
+    // MBs since skip MBs are 16×16 by spec and bypass partition analysis.
     {
-        auto* g = addSection("\u2500\u2500 PARTITIONS & DCT");
-        m_cbPartition = addCombo(g, 0, 0, "Partition Mode",
-            {"Default","16\u00D716 only","p8\u00D78","All","All+4\u00D74"}, 0, paramContainer);
-        m_cbx8x8DCT   = addToggle(g, 0, 1, "8\u00D78 DCT", true, paramContainer);
+        auto* g = addSection("\u2500\u2500 MB TYPE (PER FRAME TYPE) & DCT");
+        m_cbIFrameMbType = addCombo(g, 0, 0, "I-frame MB Type",
+            {"Default", "16\u00D716 only", "+8\u00D78", "+8\u00D78 +4\u00D74"},
+            0, paramContainer);
+        m_cbPFrameMbType = addCombo(g, 0, 1, "P-frame MB Type",
+            {"Default", "16\u00D716 only", "+8\u00D78", "+8\u00D78 +4\u00D74"},
+            0, paramContainer);
+        m_cbBFrameMbType = addCombo(g, 1, 0, "B-frame MB Type",
+            {"Default", "16\u00D716 only", "+8\u00D78"},
+            0, paramContainer);
+        m_cbx8x8DCT      = addToggle(g, 1, 1, "8\u00D78 DCT", true, paramContainer);
     }
 
     // ── B-FRAME PREDICTION ───────────────────────────────────────────────────
@@ -535,8 +561,10 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
     p.meRange    = m_sbMERange->value();
     p.subpelRef  = m_sbSubpelRef->value();
 
-    p.partitionMode = m_cbPartition->currentIndex() - 1;
-    p.use8x8DCT     = m_cbx8x8DCT->isChecked();
+    p.iFrameMbType = m_cbIFrameMbType->currentIndex() - 1;
+    p.pFrameMbType = m_cbPFrameMbType->currentIndex() - 1;
+    p.bFrameMbType = m_cbBFrameMbType->currentIndex() - 1;
+    p.use8x8DCT    = m_cbx8x8DCT->isChecked();
 
     p.directMode    = m_cbDirectMode->currentIndex() - 1;
     p.weightedPredB = m_cbWeightedB->isChecked();
@@ -599,7 +627,12 @@ void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
     m_sbMERange->setValue(p.meRange);
     m_sbSubpelRef->setValue(p.subpelRef);
 
-    m_cbPartition->setCurrentIndex(qBound(0, p.partitionMode + 1, m_cbPartition->count() - 1));
+    m_cbIFrameMbType->setCurrentIndex(
+        qBound(0, p.iFrameMbType + 1, m_cbIFrameMbType->count() - 1));
+    m_cbPFrameMbType->setCurrentIndex(
+        qBound(0, p.pFrameMbType + 1, m_cbPFrameMbType->count() - 1));
+    m_cbBFrameMbType->setCurrentIndex(
+        qBound(0, p.bFrameMbType + 1, m_cbBFrameMbType->count() - 1));
     m_cbx8x8DCT->setChecked(p.use8x8DCT);
 
     m_cbDirectMode->setCurrentIndex(qBound(0, p.directMode + 1, m_cbDirectMode->count() - 1));

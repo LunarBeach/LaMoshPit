@@ -127,4 +127,14 @@ private:
     QString m_undoBackupPath;
     bool    m_hasUndo       { false };
     bool    m_transformBusy { false };
+
+    // Tracks which render path was used on the most recent startTransform() —
+    // reloadVideoAndTimeline() skips BitstreamAnalyzer re-analysis when this
+    // is MBEditOnly (frame types / count unchanged by MB edits, so the cached
+    // analysis from before the render is still valid).  Avoids invoking
+    // h264bitstream on outputs that contain long runs of P_SKIP MBs — the
+    // library is known to crash on such patterns, which was the root cause
+    // of the post-render crash observed on bitstream-surgery renders.
+    FrameTransformerWorker::TargetType m_lastRenderType {
+        FrameTransformerWorker::MBEditOnly };
 };

@@ -180,7 +180,8 @@ private:
     QDial* m_dialBsMvdY;       QSpinBox* m_sbBsMvdY;
     QDial* m_dialBsForceSkip;  QSpinBox* m_sbBsForceSkip;
     QDial* m_dialBsIntraMode;  QSpinBox* m_sbBsIntraMode;
-    QDial* m_dialBsMbType;     QSpinBox* m_sbBsMbType;
+    // m_dialBsMbType / m_sbBsMbType removed — control migrated to Global
+    // Encode Params → Partition Mode for stability and correctness.
     QDial* m_dialBsDctScale;   QSpinBox* m_sbBsDctScale;
     QDial* m_dialBsCbpZero;    QSpinBox* m_sbBsCbpZero;
 

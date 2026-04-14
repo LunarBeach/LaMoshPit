@@ -130,7 +130,13 @@ static QJsonObject gpToJson(const GlobalEncodeParams& p)
     o["meMethod"]      = p.meMethod;
     o["meRange"]       = p.meRange;
     o["subpelRef"]     = p.subpelRef;
+    // Legacy single-partition field kept for backward compat with old presets
+    // (readers that don't know about the new three-field split still round-trip).
     o["partitionMode"] = p.partitionMode;
+    // New per-frame-type MB Type dropdowns.
+    o["iFrameMbType"]  = p.iFrameMbType;
+    o["pFrameMbType"]  = p.pFrameMbType;
+    o["bFrameMbType"]  = p.bFrameMbType;
     o["use8x8DCT"]     = p.use8x8DCT;
     o["directMode"]    = p.directMode;
     o["weightedPredB"] = p.weightedPredB;
@@ -180,7 +186,12 @@ static GlobalEncodeParams jsonToGP(const QJsonObject& o)
     p.meMethod      = o["meMethod"].toInt(-1);
     p.meRange       = o["meRange"].toInt(-1);
     p.subpelRef     = o["subpelRef"].toInt(-1);
-    p.partitionMode = o["partitionMode"].toInt(-1);
+    p.partitionMode = o["partitionMode"].toInt(-1);  // legacy, no longer read by render
+    // New per-frame-type MB Type dropdowns — default -1 when absent so old
+    // presets written before the split seamlessly upgrade to "natural" behaviour.
+    p.iFrameMbType  = o["iFrameMbType"].toInt(-1);
+    p.pFrameMbType  = o["pFrameMbType"].toInt(-1);
+    p.bFrameMbType  = o["bFrameMbType"].toInt(-1);
     p.use8x8DCT     = o["use8x8DCT"].toBool(true);
     p.directMode    = o["directMode"].toInt(-1);
     p.weightedPredB = o["weightedPredB"].toBool(true);

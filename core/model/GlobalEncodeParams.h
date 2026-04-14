@@ -39,9 +39,36 @@ struct GlobalEncodeParams {
     int  subpelRef    = -1;   // -1=default; 0..10 subpixel refinement passes
 
     // ── Partition modes ───────────────────────────────────────────────────────
-    //  Restricting to 16×16 only → crude predictions → big block artifacts.
-    //  All partitions (p4×4 etc.) → very accurate → few artifacts (for research).
-    int  partitionMode = -1;  // -1=default; 0=16x16_only; 1=p8x8; 2=all; 3=all+4x4
+    //  Per-frame-type MB Type dropdowns control which partition subdivisions
+    //  x264 is allowed to emit for each slice type.  See x264's --partitions
+    //  parameter for the underlying mechanism.
+    //
+    //  NOTE on precedence:  Force Skip (MB Editor, per-MB) ALWAYS wins over
+    //  these partition flags on its flagged MBs — skip MBs are 16×16 by H.264
+    //  spec and bypass analysis entirely.  Other per-MB bitstream knobs
+    //  (CBP Zero, DCT Scale, Force Intra Mode, MVD Injection) also compose
+    //  cleanly with any partition setting here.
+    //
+    //  ── I-frame MB Type ──
+    //  Controls i4x4 / i8x8 flags.  Also (x264 consequence) governs the
+    //  partition choices for the tiny minority of intra MBs that appear in
+    //  P/B frames, since intra-partition flags are encoder-wide.
+    //
+    //  ── P-frame MB Type ──
+    //  Controls p8x8 / p4x4 flags.  Affects P-slice inter MBs.
+    //
+    //  ── B-frame MB Type ──
+    //  Controls b8x8 flag.  Affects B-slice bi-directional inter MBs.
+    //  (H.264 has no b4x4 sub-partition — two options only.)
+    int  iFrameMbType = -1;   // -1=default; 0=16x16_only; 1=+8x8; 2=+8x8+4x4
+    int  pFrameMbType = -1;   // -1=default; 0=16x16_only; 1=+8x8; 2=+8x8+4x4
+    int  bFrameMbType = -1;   // -1=default; 0=16x16_only; 1=+8x8
+
+    // Legacy field — kept for JSON backward compatibility with saved presets
+    // written before the three-dropdown split.  No longer read by either
+    // render path; new code writes only to iFrameMbType/pFrameMbType/bFrameMbType.
+    int  partitionMode = -1;
+
     bool use8x8DCT    = true; // false → 4×4 DCT only (lower freq capture)
 
     // ── B-frame prediction ────────────────────────────────────────────────────
@@ -199,24 +226,30 @@ inline GlobalEncodeParams presetParams(EncodePreset preset)
         break;
 
     case EncodePreset::GlitchWave:
-        p.meMethod      = 0;
-        p.meRange       = 128;
-        p.partitionMode = 2;
-        p.psyRD         = 3.0f;
-        p.trellis       = 2;
-        p.noFastPSkip   = true;
-        p.subpelRef     = 4;
+        p.meMethod       = 0;
+        p.meRange        = 128;
+        // Old "partitionMode=2 (all)" → I: all, P: p8x8, B: b8x8
+        p.iFrameMbType   = 2;
+        p.pFrameMbType   = 1;
+        p.bFrameMbType   = 1;
+        p.psyRD          = 3.0f;
+        p.trellis        = 2;
+        p.noFastPSkip    = true;
+        p.subpelRef      = 4;
         break;
 
     case EncodePreset::BlockMosaic:
-        p.partitionMode = 0;
-        p.subpelRef     = 0;
-        p.trellis       = 0;
-        p.noDeblock     = true;
-        p.use8x8DCT     = false;
-        p.meMethod      = 0;
-        p.meRange       = 8;
-        p.gopSize       = 0;
+        // Old "partitionMode=0 (16×16 only)" → all three dropdowns = 16×16 only
+        p.iFrameMbType   = 0;
+        p.pFrameMbType   = 0;
+        p.bFrameMbType   = 0;
+        p.subpelRef      = 0;
+        p.trellis        = 0;
+        p.noDeblock      = true;
+        p.use8x8DCT      = false;
+        p.meMethod       = 0;
+        p.meRange        = 8;
+        p.gopSize        = 0;
         break;
 
     case EncodePreset::ChromaFever:
@@ -229,13 +262,16 @@ inline GlobalEncodeParams presetParams(EncodePreset preset)
         break;
 
     case EncodePreset::QuantumResidue:
-        p.noDctDecimate = true;
-        p.noFastPSkip   = true;
-        p.trellis       = 2;
-        p.use8x8DCT     = true;
-        p.partitionMode = 3;
-        p.subpelRef     = 10;
-        p.psyRD         = 0.5f;
+        p.noDctDecimate  = true;
+        p.noFastPSkip    = true;
+        p.trellis        = 2;
+        p.use8x8DCT      = true;
+        // Old "partitionMode=3 (all+4×4)" → I: all, P: +4×4, B: b8x8
+        p.iFrameMbType   = 2;
+        p.pFrameMbType   = 2;
+        p.bFrameMbType   = 1;
+        p.subpelRef      = 10;
+        p.psyRD          = 0.5f;
         break;
 
     case EncodePreset::TemporalBleed:

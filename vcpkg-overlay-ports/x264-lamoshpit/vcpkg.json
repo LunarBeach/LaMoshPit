@@ -1,7 +1,7 @@
 {
   "name": "x264-lamoshpit",
   "version": "0.164.3108",
-  "port-version": 3,
+  "port-version": 9,
   "description": "LaMoshPit-Edge fork of x264 with per-MB CBP override hooks for bitstream-level datamosh edits.",
   "homepage": "https://github.com/LunarBeach/LaMoshPit",
   "license": "GPL-2.0-or-later",

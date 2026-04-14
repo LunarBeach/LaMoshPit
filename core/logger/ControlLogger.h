@@ -53,8 +53,21 @@ public:
     // Called once at the start of FrameTransformerWorker::run().
     void logApplyStarted(int totalFrames, int editedFrameCount);
 
+    // Called immediately after logApplyStarted() by whichever runXxx() method
+    // actually services this render.  The string ends up in the log as
+    // "APPLY VIA <path>" — critical for distinguishing pixel-domain (FFmpeg
+    // wrapped libx264) from bitstream-surgery (direct libx264 via the
+    // LaMoshPit-Edge fork with override hooks) runs.
+    void logRenderPath(const QString& pathName);
+
     // Called just before emit done() in FrameTransformerWorker::run().
     void logApplyCompleted(bool success);
+
+    // Free-form diagnostic line — writes a single timestamped entry to both
+    // the console and the log file.  Used to trace code paths when we need
+    // finer-grained than "APPLY STARTED / COMPLETED" but don't want to invent
+    // a new log category for each breadcrumb.
+    void logNote(const QString& message);
 
     // ── Session lifecycle ─────────────────────────────────────────────────────
     // Called when a new video is loaded.  Writes a header block to the log.

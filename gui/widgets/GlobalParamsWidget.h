@@ -76,8 +76,13 @@ private:
     QSpinBox*       m_sbMERange;
     QSpinBox*       m_sbSubpelRef;
 
-    // ── Partitions / DCT
-    QComboBox*      m_cbPartition;
+    // ── Partitions / DCT  (three frame-type-specific MB Type dropdowns
+    //     plus the 8×8 DCT toggle).  The old single m_cbPartition field
+    //     was replaced by per-slice-type controls so users can restrict
+    //     subdivision independently on I, P, and B frames.
+    QComboBox*      m_cbIFrameMbType;
+    QComboBox*      m_cbPFrameMbType;
+    QComboBox*      m_cbBFrameMbType;
     ToggleSwitch*   m_cbx8x8DCT;
 
     // ── B-frame prediction

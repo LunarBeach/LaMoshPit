@@ -130,6 +130,14 @@ target_link_libraries(LeeAnnesMoshPit PRIVATE
     optimized "${VCPKG_X64_WIN}/lib/swscale.lib"
     debug     "${VCPKG_X64_WIN}/debug/lib/swresample.lib"
     optimized "${VCPKG_X64_WIN}/lib/swresample.lib"
+    # LaMoshPit-Edge: our forked libx264 (x264-lamoshpit vcpkg overlay port).
+    # Provides bitstream-surgery hooks in x264_image_properties_t for per-MB
+    # overrides (CBP zero, force skip, force MB type, force intra mode,
+    # MVD injection, DCT scale).  FrameTransformer::runBitstreamEdit() calls
+    # x264_encoder_encode directly, bypassing FFmpeg's libx264 wrapper, to
+    # populate pic.prop.*_override fields with per-MB data from FrameMBParams.
+    debug     "${VCPKG_X64_WIN}/debug/lib/libx264.lib"
+    optimized "${VCPKG_X64_WIN}/lib/libx264.lib"
 )
 # Add Multimedia if found
 if(HAS_MULTIMEDIA)

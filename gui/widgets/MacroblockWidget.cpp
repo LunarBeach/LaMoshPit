@@ -686,10 +686,16 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     }
 
     // ── BITSTREAM SURGERY — PREDICTION ───────────────────────────────────────
+    // Note: per-MB "Force MB Type" was removed in favour of x264's native
+    // --partitions encoder parameter (see Global Encode Params → Partition
+    // Mode).  Global --partitions control is safer than per-MB override
+    // (uses x264's battle-tested RD path) and better matches how intra
+    // subdivision is actually chosen (encoder-wide, not per-MB).  The
+    // m_dialBsMbType / m_sbBsMbType widgets are no longer instantiated;
+    // FrameMBParams::bsMbType remains at its -1 default forever.
     {
         auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 PREDICTION");
         s.l->addWidget(makeKnob("Intra Mode",  -1,  3,  m_dialBsIntraMode, m_sbBsIntraMode, s.w));
-        s.l->addWidget(makeKnob("MB Type",     -1,  4,  m_dialBsMbType,    m_sbBsMbType,    s.w));
         s.l->addStretch(1);
     }
 
@@ -845,7 +851,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     connectKnobs(m_dialBsMvdY,       m_sbBsMvdY,       &FrameMBParams::bsMvdY,       "BS MVD Y");
     connectKnobs(m_dialBsForceSkip,  m_sbBsForceSkip,  &FrameMBParams::bsForceSkip,  "BS Force Skip");
     connectKnobs(m_dialBsIntraMode,  m_sbBsIntraMode,  &FrameMBParams::bsIntraMode,  "BS Intra Mode");
-    connectKnobs(m_dialBsMbType,     m_sbBsMbType,     &FrameMBParams::bsMbType,     "BS MB Type");
+    // bsMbType knob removed — replaced by Global Encode Params → Partition Mode.
     connectKnobs(m_dialBsDctScale,   m_sbBsDctScale,   &FrameMBParams::bsDctScale,   "BS DCT Scale");
     connectKnobs(m_dialBsCbpZero,    m_sbBsCbpZero,    &FrameMBParams::bsCbpZero,    "BS CBP Zero");
 
@@ -1299,7 +1305,7 @@ void MacroblockWidget::loadKnobsFromCurrentFrame()
     setKnob(m_dialBsMvdY,       m_sbBsMvdY,       p.bsMvdY);
     setKnob(m_dialBsForceSkip,  m_sbBsForceSkip,  p.bsForceSkip);
     setKnob(m_dialBsIntraMode,  m_sbBsIntraMode,  p.bsIntraMode);
-    setKnob(m_dialBsMbType,     m_sbBsMbType,     p.bsMbType);
+    // bsMbType knob removed — see Partition Mode in Global Encode Params.
     setKnob(m_dialBsDctScale,   m_sbBsDctScale,   p.bsDctScale);
     setKnob(m_dialBsCbpZero,    m_sbBsCbpZero,    p.bsCbpZero);
 
@@ -1478,7 +1484,7 @@ void MacroblockWidget::applyControlParams(const FrameMBParams& p)
         ep.bsMvdY       = p.bsMvdY;
         ep.bsForceSkip  = p.bsForceSkip;
         ep.bsIntraMode  = p.bsIntraMode;
-        ep.bsMbType     = p.bsMbType;
+        /* ep.bsMbType left untouched — control moved to Partition Mode. */
         ep.bsDctScale   = p.bsDctScale;
         ep.bsCbpZero    = p.bsCbpZero;
     }

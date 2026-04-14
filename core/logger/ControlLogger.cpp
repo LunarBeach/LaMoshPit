@@ -168,6 +168,22 @@ void ControlLogger::logFrameEditApplied(int frameIdx, const FrameMBParams& p,
     chk("refScatter",   p.refScatter);
     chk("colorTwistU",  p.colorTwistU);
     chk("colorTwistV",  p.colorTwistV);
+    // Newer pixel-domain knobs (posterize default is 8 = off; others default 0).
+    chk("posterize",    p.posterize,    8);
+    chk("pixelShuffle", p.pixelShuffle);
+    chk("sharpen",      p.sharpen);
+    chk("tempDiffAmp",  p.tempDiffAmp);
+    chk("hueRotate",    p.hueRotate);
+    // Bitstream-surgery knobs — critical for validating the runBitstreamEdit()
+    // render path.  bsDctScale default is 100 (unchanged); bsIntraMode/bsMbType
+    // default −1 (off); all others default 0.
+    chk("bsMvdX",       p.bsMvdX);
+    chk("bsMvdY",       p.bsMvdY);
+    chk("bsForceSkip",  p.bsForceSkip);
+    chk("bsIntraMode",  p.bsIntraMode,  -1);
+    /* bsMbType not logged — feature migrated to Partition Mode (encoder-wide). */
+    chk("bsDctScale",   p.bsDctScale,   100);
+    chk("bsCbpZero",    p.bsCbpZero);
 
     write(QString("         \\_ end frame %1").arg(frameIdx));
 }
@@ -182,6 +198,20 @@ void ControlLogger::logApplyStarted(int totalFrames, int editedFrameCount)
     write("[" + timestamp() + "] -- APPLY STARTED " + QString(52, '-'));
     write(QString("    totalFrames=%1  framesWithEdits=%2")
           .arg(totalFrames).arg(editedFrameCount));
+}
+
+void ControlLogger::logRenderPath(const QString& pathName)
+{
+    if (!m_enabled) return;
+    QMutexLocker lock(&m_mutex);
+    write("[" + timestamp() + "]    APPLY VIA " + pathName);
+}
+
+void ControlLogger::logNote(const QString& message)
+{
+    if (!m_enabled) return;
+    QMutexLocker lock(&m_mutex);
+    write("[" + timestamp() + "] NOTE  " + message);
 }
 
 void ControlLogger::logApplyCompleted(bool success)

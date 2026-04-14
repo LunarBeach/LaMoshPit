@@ -1278,13 +1278,48 @@ static void mb_analyse_inter_p16x16( x264_t *h, x264_mb_analysis_t *a )
         && h->fdec->mvd_y_override )
     {
         int mb_xy = h->mb.i_mb_xy;
-        a->l0.me16x16.cost     = 1; /* non-MAX so this MV is picked */
+
+        /* Clip the user's forced MV to x264's spel-domain valid range so
+         * downstream motion compensation doesn't dereference outside the
+         * reference frame's padded region.  The mv_min_spel / mv_max_spel
+         * bounds are populated by x264_macroblock_cache_load before analysis. */
+        int16_t mvx = h->fdec->mvd_x_override[mb_xy];
+        int16_t mvy = h->fdec->mvd_y_override[mb_xy];
+        if( mvx < h->mb.mv_min_spel[0] ) mvx = h->mb.mv_min_spel[0];
+        if( mvx > h->mb.mv_max_spel[0] ) mvx = h->mb.mv_max_spel[0];
+        if( mvy < h->mb.mv_min_spel[1] ) mvy = h->mb.mv_min_spel[1];
+        if( mvy > h->mb.mv_max_spel[1] ) mvy = h->mb.mv_max_spel[1];
+
+        a->l0.me16x16.cost     = 1; /* non-MAX so P_L0 wins SATD comparison */
         a->l0.me16x16.i_ref    = 0;
-        a->l0.me16x16.mv[0]    = h->fdec->mvd_x_override[mb_xy];
-        a->l0.me16x16.mv[1]    = h->fdec->mvd_y_override[mb_xy];
-        a->l0.i_rd16x16        = COST_MAX;
+        a->l0.me16x16.mv[0]    = mvx;
+        a->l0.me16x16.mv[1]    = mvy;
+        /* Set i_rd16x16 to a LOW value (not COST_MAX) so downstream RD
+         * comparisons see P_L0 as cheapest and don't switch to another
+         * partition.  COST_MAX would invert this: rd_cost_mb would be
+         * invoked at mb_analyse_p_rd and recompute a real (high) value
+         * for our intentionally-wrong MV, then P_8x8 / etc. would beat
+         * us.  The post-RD clamp near analyse_update_cache is still
+         * present as belt-and-suspenders. */
+        a->l0.i_rd16x16        = 0;
         h->mb.i_type           = P_L0;
         h->mb.i_partition      = D_16x16;
+
+        /* CRITICAL: populate the MB cache so downstream encode has the ref
+         * index and motion vector.  Without this, macroblock_encode reads
+         * h->mb.cache.ref[0][x264_scan8[0]] and h->mb.cache.mv[0][x264_scan8[0]]
+         * which contain stale data from the previous MB — producing either
+         * silent wrong motion compensation or a crash inside mc_luma when
+         * stale values clip to the edge of valid MV range.  Same class of bug
+         * as was present in the Force Skip hook before its fix. */
+        x264_macroblock_cache_ref   ( h, 0, 0, 4, 4, 0, 0 );
+        x264_macroblock_cache_mv_ptr( h, 0, 0, 4, 4, 0, a->l0.me16x16.mv );
+
+        /* Also record this MV in the "saved MV for predictor neighbours"
+         * table, matching what the natural inter-search path does at the
+         * end of mb_analyse_inter_p16x16 (~line 1319 in this file). */
+        CP32( h->mb.mvr[0][0][h->mb.i_mb_xy], a->l0.me16x16.mv );
+
         return;
     }
 
@@ -2971,6 +3006,20 @@ void x264_macroblock_analyse( x264_t *h )
     {
         if( h->sh.i_type == SLICE_TYPE_P )
         {
+            /* CRITICAL: downstream code (macroblock_encode for P_SKIP) reads
+             * h->mb.cache.mv[0][x264_scan8[0]] to run motion compensation.
+             * On natural P_SKIP these caches are populated by the inter
+             * analysis path before i_type is written.  We are short-circuiting
+             * that path, so we MUST populate the caches ourselves or the
+             * encoder reads stale data from the previous MB (garbage MV +
+             * garbage ref index → crash inside mc_luma when mv_min/mv_max
+             * clipping overflows after ~270-300 MBs on an all-skip pattern).
+             *
+             * pskip_mv itself is already populated by x264_macroblock_cache_load
+             * (common/macroblock.c:1338) before x264_macroblock_analyse is
+             * called, so we can read it here safely. */
+            x264_macroblock_cache_ref   ( h, 0, 0, 4, 4, 0, 0 );
+            x264_macroblock_cache_mv_ptr( h, 0, 0, 4, 4, 0, h->mb.cache.pskip_mv );
             h->mb.i_type = P_SKIP;
             h->mb.i_partition = D_16x16;
             /* Zero MVs for future predictors (matches natural skip behaviour) */
@@ -2980,8 +3029,14 @@ void x264_macroblock_analyse( x264_t *h )
         }
         else if( h->sh.i_type == SLICE_TYPE_B )
         {
-            h->mb.i_type = B_SKIP;
-            return;
+            /* B_SKIP uses direct-mode prediction.  Setting i_type alone is
+             * insufficient for the same reason as P_SKIP above — but B-slice
+             * direct mode setup is more involved (requires temporal / spatial
+             * direct MV compute).  Deferred: user's workflow typically
+             * Force-P's frames before applying bitstream knobs, so this
+             * branch is rarely hit.  Guard it off for now to prevent the
+             * same class of crash if it ever fires. */
+            /* fall through to normal analysis */
         }
         /* SLICE_TYPE_I: fall through — no skip MBs exist for I-slices. */
     }
@@ -3017,10 +3072,27 @@ intra_analysis:
         if( h->fdec->mb_type_override && h->fdec->mb_type_override[h->mb.i_mb_xy] )
         {
             uint8_t forced = h->fdec->mb_type_override[h->mb.i_mb_xy];
-            if     ( forced == 1 ) h->mb.i_type = I_16x16;
-            else if( forced == 2 ) h->mb.i_type = I_4x4;
-            else if( forced == 3 ) h->mb.i_type = I_8x8;
-            /* 4 (P_L0) and 5 (P_8x8) are meaningless on I-slices; ignore. */
+            if( forced == 1 )
+            {
+                /* I_16x16 — the one case where no extra cache work is needed.
+                 * mb_analyse_intra already populated i_intra16x16_pred_mode
+                 * with its chosen mode; downstream macroblock_encode uses
+                 * that value to drive prediction.  Force Intra Mode (below)
+                 * may further override the mode itself. */
+                h->mb.i_type = I_16x16;
+            }
+            /* forced == 2 (I_4x4) and forced == 3 (I_8x8) are intentionally
+             * unsupported in the current implementation.  A naive override
+             * (setting i_type + filling intra4x4_pred_mode with DC) works on
+             * a single isolated IDR (e.g. frame 0) but crashes when multiple
+             * per-MB override arrays are in flight across x264's multi-frame
+             * lookahead/reorder queue — the interaction between forced-I_4x4
+             * frame 0 and downstream P-frames' inter-prediction references
+             * is not fully understood, and a proper fix requires deeper x264
+             * internals work.  Tracked as future work in the architecture
+             * doc.  For now: forced == 2 or 3 is silently ignored, falling
+             * back to whichever type mb_analyse_intra picked naturally. */
+            /* forced == 4 (P_L0) and 5 (P_8x8) are meaningless on I-slices. */
         }
 
         /* LaMoshPit-Edge Force Intra Mode override.
@@ -3787,6 +3859,26 @@ skip_analysis:
                 }
             }
         }
+    }
+
+    /* LaMoshPit-Edge: MVD Injection post-RD clamp.  The hook at the top of
+     * mb_analyse_inter_p16x16 already forced h->mb.i_type = P_L0 and
+     * i_partition = D_16x16 and populated a->l0.me16x16.mv with the user's
+     * forced MV.  But on P-slices, mb_analyse_p_rd + subsequent RD-based
+     * partition comparisons can switch i_type / i_partition to something
+     * else (because rd_cost_mb computes the actual residual of our
+     * intentionally-wrong MV and finds other partitions cheaper).  The
+     * analyse_update_cache call below only commits our MV when i_type is
+     * still P_L0 and i_partition is still D_16x16 — so we restore those
+     * here.  The me.c refinement guards preserve a->l0.me16x16.mv, so this
+     * restoration is safe: analyse_update_cache → case P_L0 + D_16x16
+     * writes a->l0.me16x16.mv to the cache, which is what we want. */
+    if( h->sh.i_type == SLICE_TYPE_P
+        && h->fdec->mvd_active_override
+        && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
+    {
+        h->mb.i_type      = P_L0;
+        h->mb.i_partition = D_16x16;
     }
 
     analyse_update_cache( h, &analysis );

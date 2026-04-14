@@ -10,6 +10,7 @@
 #include "core/pipeline/DecodePipeline.h"
 #include "core/transform/FrameTransformer.h"
 #include "core/presets/PresetManager.h"
+#include "core/logger/ControlLogger.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -513,13 +514,24 @@ void MainWindow::openFile()
 
 void MainWindow::analyzeImportedVideo(const QString& videoPath)
 {
+    // Breadcrumb trace — mirrors reloadVideoAndTimeline so a crash during
+    // a fresh import is traceable in the same log format.
+    auto& L = ControlLogger::instance();
+    L.logNote("analyzeImportedVideo — step A: BitstreamAnalyzer::analyzeVideo()");
     m_lastAnalysis = BitstreamAnalyzer::analyzeVideo(videoPath);
+    L.logNote(QString("analyzeImportedVideo — step B: analysis.success = %1")
+              .arg(m_lastAnalysis.success ? "true" : "false"));
 
     if (m_lastAnalysis.success) {
+        L.logNote("analyzeImportedVideo — step C: printAnalysis");
         BitstreamAnalyzer::printAnalysis(m_lastAnalysis);
+        L.logNote("analyzeImportedVideo — step D: saveAnalysisToFile");
         BitstreamAnalyzer::saveAnalysisToFile(m_lastAnalysis, videoPath);
+        L.logNote("analyzeImportedVideo — step E: populateTimeline");
         populateTimeline(m_lastAnalysis);
+        L.logNote("analyzeImportedVideo — step F: mbWidget->setVideo()");
         m_mbWidget->setVideo(videoPath, m_lastAnalysis);
+        L.logNote("analyzeImportedVideo — step G: status update");
         statusBar()->showMessage(
             QString("Ready — %1 frames  I:%2  P:%3  B:%4")
                 .arg(m_lastAnalysis.totalFrames)
@@ -530,6 +542,7 @@ void MainWindow::analyzeImportedVideo(const QString& videoPath)
         statusBar()->showMessage("Analysis failed: " + m_lastAnalysis.errorMessage);
         QMessageBox::warning(this, "Analysis Failed", m_lastAnalysis.errorMessage);
     }
+    L.logNote("analyzeImportedVideo — DONE");
 }
 
 void MainWindow::populateTimeline(const AnalysisReport& report)
@@ -2352,6 +2365,10 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
 {
     if (m_transformBusy || m_currentVideoPath.isEmpty()) return;
 
+    // Capture render type for the post-render reload logic — see the comment
+    // on m_lastRenderType in MainWindow.h.
+    m_lastRenderType = type;
+
     QVector<int> sel = m_timeline->selectedFrames();
 
     if (type == FrameTransformerWorker::MBEditOnly) {
@@ -2405,8 +2422,28 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
     m_progressBar->setValue(0);
 
     if (type == FrameTransformerWorker::MBEditOnly) {
+        // Detect whether any frame carries a bitstream-surgery knob — the
+        // FrameTransformer routes those through runBitstreamEdit() (our direct
+        // libx264 path), not the FFmpeg pixel-domain path.  Surface which
+        // engine is running so the user can correlate behaviour with the
+        // rendering mode.
+        bool anyBS = false;
+        if (m_mbWidget->isVisible()) {
+            const MBEditMap& em = m_mbWidget->editMap();
+            for (auto it = em.constBegin(); it != em.constEnd() && !anyBS; ++it) {
+                const FrameMBParams& p = it.value();
+                /* bsMbType intentionally dropped here — feature migrated to
+                 * GlobalEncodeParams::partitionMode.  The per-MB field is no
+                 * longer set by any UI; checking it would be dead code. */
+                if (p.bsCbpZero > 0 || p.bsForceSkip > 0 ||
+                    p.bsIntraMode >= 0 ||
+                    p.bsMvdX != 0 || p.bsMvdY != 0 ||
+                    p.bsDctScale != 100) anyBS = true;
+            }
+        }
         statusBar()->showMessage(
-            QString("Applying MB edits to %1 frame%2 ...")
+            QString("%1 — applying MB edits to %2 frame%3 ...")
+                .arg(anyBS ? "Bitstream surgery (direct libx264)" : "Pixel-domain (FFmpeg)")
                 .arg(m_lastAnalysis.frames.size())
                 .arg(m_lastAnalysis.frames.size() == 1 ? "" : "s"));
     } else {
@@ -2515,14 +2552,53 @@ void MainWindow::onUndo()
 
 void MainWindow::reloadVideoAndTimeline()
 {
+    // Breadcrumb trace — each line prints BEFORE the step runs, so the last
+    // line in the log file identifies the step that crashed on a hard crash.
+    // Routed through ControlLogger so breadcrumbs end up in the same file as
+    // the APPLY STARTED / COMPLETED markers.
+    auto& L = ControlLogger::instance();
+
+    // MBEditOnly renders do not change the frame count or per-frame slice
+    // types — only MB content within each frame.  That means the cached
+    // m_lastAnalysis from before the render is still accurate and we can
+    // safely skip BitstreamAnalyzer::analyzeVideo() here.  Doing so avoids
+    // h264bitstream's fragile NAL parser, which crashes when fed outputs
+    // that contain long runs of P_SKIP macroblocks (e.g. the output of a
+    // Force-Skip bitstream-surgery render).  Frame-type-changing renders
+    // (ForceI/P/B, DeleteFrames, Interp*, Reorder, Flip*, Dup*) fall through
+    // to the full re-analysis path since their outputs have different
+    // structure than the input.
+    const bool canReuseAnalysis =
+        (m_lastRenderType == FrameTransformerWorker::MBEditOnly) &&
+        m_lastAnalysis.success;
+
+    L.logNote("reloadVideoAndTimeline — step 1: preview->loadVideo()");
     m_preview->loadVideo(m_currentVideoPath);
+    L.logNote("reloadVideoAndTimeline — step 2: videoSequence->load()");
     m_videoSequence->load(m_currentVideoPath);
-    m_lastAnalysis = BitstreamAnalyzer::analyzeVideo(m_currentVideoPath);
+
+    if (canReuseAnalysis) {
+        L.logNote("reloadVideoAndTimeline — step 3: SKIPPED — reusing cached "
+                  "analysis for MBEditOnly render (frame structure unchanged)");
+    } else {
+        L.logNote("reloadVideoAndTimeline — step 3: BitstreamAnalyzer::analyzeVideo()");
+        m_lastAnalysis = BitstreamAnalyzer::analyzeVideo(m_currentVideoPath);
+        L.logNote(QString("reloadVideoAndTimeline — step 4: analysis.success = %1")
+                  .arg(m_lastAnalysis.success ? "true" : "false"));
+    }
+
     if (m_lastAnalysis.success) {
-        BitstreamAnalyzer::printAnalysis(m_lastAnalysis);
-        BitstreamAnalyzer::saveAnalysisToFile(m_lastAnalysis, m_currentVideoPath);
+        if (!canReuseAnalysis) {
+            L.logNote("reloadVideoAndTimeline — step 5: printAnalysis");
+            BitstreamAnalyzer::printAnalysis(m_lastAnalysis);
+            L.logNote("reloadVideoAndTimeline — step 6: saveAnalysisToFile");
+            BitstreamAnalyzer::saveAnalysisToFile(m_lastAnalysis, m_currentVideoPath);
+        }
+        L.logNote("reloadVideoAndTimeline — step 7: populateTimeline");
         populateTimeline(m_lastAnalysis);
+        L.logNote("reloadVideoAndTimeline — step 8: mbWidget->reload()");
         m_mbWidget->reload(m_currentVideoPath, m_lastAnalysis);
+        L.logNote("reloadVideoAndTimeline — step 9: status update");
         statusBar()->showMessage(
             QString("Ready — %1 frames  I:%2  P:%3  B:%4")
                 .arg(m_lastAnalysis.totalFrames)
@@ -2532,6 +2608,7 @@ void MainWindow::reloadVideoAndTimeline()
     } else {
         statusBar()->showMessage("Re-analysis failed: " + m_lastAnalysis.errorMessage);
     }
+    L.logNote("reloadVideoAndTimeline — DONE");
 }
 
 // =============================================================================

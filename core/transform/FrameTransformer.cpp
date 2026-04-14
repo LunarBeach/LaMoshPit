@@ -5,7 +5,9 @@
 #include <QFile>
 #include <QDebug>
 #include <QSet>
-#include <cstdlib>   // std::rand()
+#include <QByteArray>
+#include <cstdlib>   // std::rand(), malloc/free
+#include <cstring>   // memcpy, memset
 #include <cmath>     // sin, cos, round
 
 extern "C" {
@@ -15,6 +17,8 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/rational.h>
 #include <libavutil/frame.h>
+#include <libavutil/mem.h>
+#include <x264.h>
 }
 
 FrameTransformerWorker::FrameTransformerWorker(const QString& videoPath,
@@ -36,6 +40,29 @@ FrameTransformerWorker::FrameTransformerWorker(const QString& videoPath,
     , m_globalParams(globalParams)
     , m_interpolateCount(interpolateCount)
 {}
+
+// ── Helper: does any frame's FrameMBParams have a bitstream-surgery knob set? ─
+// Used by run() to dispatch to runBitstreamEdit() (the parallel libx264-direct
+// render path) instead of the FFmpeg-wrapped pixel path.  Only the bs* fields
+// count: pixel-domain knobs (qpDelta, noiseLevel, ghostBlend, etc.) are handled
+// fine by the existing FFmpeg path without our x264 fork hooks.
+static bool anyBitstreamEdits(const MBEditMap& edits)
+{
+    for (auto it = edits.constBegin(); it != edits.constEnd(); ++it) {
+        const FrameMBParams& p = it.value();
+        if (p.bsCbpZero    > 0)   return true;
+        if (p.bsForceSkip  > 0)   return true;
+        // bsMbType no longer gates the bitstream path — control moved to the
+        // global --partitions parameter (GlobalEncodeParams::partitionMode)
+        // which is applied to both render paths at encoder-setup time, not
+        // per-MB.  Legacy presets that still carry bsMbType != -1 have no
+        // effect; the field remains in FrameMBParams for JSON backward compat.
+        if (p.bsIntraMode  >= 0)  return true;
+        if (p.bsMvdX != 0 || p.bsMvdY != 0) return true;
+        if (p.bsDctScale != 100)  return true;
+    }
+    return false;
+}
 
 // ── Helper: map analysis type char → AVPictureType ───────────────────────────
 static AVPictureType pictTypeFromChar(char c)
@@ -1041,6 +1068,8 @@ static AVFrame* blendFramesWeighted(const AVFrame* a, const AVFrame* b, float al
 void FrameTransformerWorker::runBitstreamSplice()
 {
     ControlLogger::instance().logApplyStarted(m_totalFrames, 0);
+    ControlLogger::instance().logRenderPath(
+        "BITSTREAM SPLICE PATH (packet copy, no re-encode — DeleteFrames)");
 
     const QString tempPath = m_videoPath + ".xform_tmp.mp4";
     QString errorMsg;
@@ -1178,6 +1207,582 @@ splice_cleanup:
     emit done(ok, errorMsg);
 }
 
+// =============================================================================
+// runBitstreamEdit — parallel render path for true bitstream-level MB edits.
+// =============================================================================
+//
+// This is the Option X2 render path (see BITSTREAM_SURGERY_ARCHITECTURE.md):
+//
+//     libavformat (demux)
+//          │
+//          ▼
+//     libavcodec (decode)
+//          │
+//          ▼
+//     applyMBEdits(...)        ← pixel-domain corruption on decoded YUV
+//          │
+//          ▼
+//     libx264 direct C API    ← our forked x264 with override hooks
+//          │   pic.prop.cbp_override      (uint8_t*, 1 = force CBP=0)
+//          │   pic.prop.mb_skip_override  (uint8_t*, 1 = force P_SKIP/B_SKIP)
+//          │   pic.prop.mb_type_override  (uint8_t*, 1..5)
+//          │   pic.prop.intra_mode_override (int8_t*, -1..3)
+//          │   pic.prop.mvd_x/y/active_override  (MVD injection)
+//          │   pic.prop.dct_scale_override (uint8_t*, 255=none, 0..200=%)
+//          ▼
+//     Annex-B → AVCC conversion
+//          │
+//          ▼
+//     libavformat (MP4 mux)
+//          ▼
+//     output.mp4
+//
+// Ownership: each override array is heap-allocated per frame with calloc/malloc
+// and passed to x264 via pic.prop.*_override_free = std::free.  x264 takes
+// ownership at x264_encoder_encode() time, uses the array during encoding, and
+// calls the free callback from the encoder thread once fdec is released.
+// The caller must NOT free these arrays — doing so would double-free.
+// =============================================================================
+void FrameTransformerWorker::runBitstreamEdit()
+{
+    // Loud marker so Debug-console output makes the render path unambiguous —
+    // the ControlLogger doesn't distinguish pixel-domain vs bitstream path on
+    // its own (both funnel through the same logApplyStarted / per-frame calls).
+    qDebug() << "[FrameTransformer] runBitstreamEdit() — direct libx264 path ("
+             << m_mbEdits.size() << "frames carry edits,"
+             << m_totalFrames << "total frames)";
+    ControlLogger::instance().logApplyStarted(m_totalFrames, m_mbEdits.size());
+    ControlLogger::instance().logRenderPath(
+        "BITSTREAM-SURGERY PATH (direct libx264 via x264-lamoshpit fork)");
+
+    const QString tempPath = m_videoPath + ".xform_tmp.mp4";
+    QString errorMsg;
+    bool    ok   = false;
+
+    AVFormatContext* ifmt   = nullptr;
+    AVFormatContext* ofmt   = nullptr;
+    AVCodecContext*  decCtx = nullptr;
+    x264_t*          x264Enc = nullptr;
+    AVPacket*        rpkt   = nullptr;
+    AVFrame*         frame  = nullptr;
+    int              vsIdx  = -1;
+
+    x264_param_t   x264Param;
+    x264_picture_t picIn;
+    x264_picture_t picOut;
+    std::memset(&picIn,  0, sizeof(picIn));
+    std::memset(&picOut, 0, sizeof(picOut));
+
+    static const int REF_BUF_SIZE = 8;
+    QVector<AVFrame*> refBuf(REF_BUF_SIZE, nullptr);
+
+    // ── Open input ─────────────────────────────────────────────────────────
+    if (avformat_open_input(&ifmt, m_videoPath.toUtf8().constData(),
+                            nullptr, nullptr) < 0) {
+        errorMsg = "Cannot open input: " + m_videoPath;
+        goto cleanup;
+    }
+    if (avformat_find_stream_info(ifmt, nullptr) < 0) {
+        errorMsg = "avformat_find_stream_info failed";
+        goto cleanup;
+    }
+    for (unsigned i = 0; i < ifmt->nb_streams; i++) {
+        if (ifmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            vsIdx = (int)i; break;
+        }
+    }
+    if (vsIdx < 0) { errorMsg = "No video stream"; goto cleanup; }
+
+    // ── Open decoder ───────────────────────────────────────────────────────
+    {
+        AVStream* inStream = ifmt->streams[vsIdx];
+        const AVCodec* dec = avcodec_find_decoder(inStream->codecpar->codec_id);
+        if (!dec) { errorMsg = "No decoder"; goto cleanup; }
+        decCtx = avcodec_alloc_context3(dec);
+        if (avcodec_parameters_to_context(decCtx, inStream->codecpar) < 0) {
+            errorMsg = "avcodec_parameters_to_context failed"; goto cleanup;
+        }
+        if (avcodec_open2(decCtx, dec, nullptr) < 0) {
+            errorMsg = "Cannot open decoder"; goto cleanup;
+        }
+    }
+
+    // ── Configure & open x264 encoder ─────────────────────────────────────
+    {
+        AVStream* inStream = ifmt->streams[vsIdx];
+        int width  = decCtx->width;
+        int height = decCtx->height;
+        int fpsNum = inStream->avg_frame_rate.num;
+        int fpsDen = inStream->avg_frame_rate.den;
+        if (fpsNum <= 0 || fpsDen <= 0) { fpsNum = 24; fpsDen = 1; }
+
+        if (x264_param_default_preset(&x264Param, "medium", nullptr) < 0) {
+            errorMsg = "x264_param_default_preset failed"; goto cleanup;
+        }
+        x264Param.i_width       = width;
+        x264Param.i_height      = height;
+        x264Param.i_csp         = X264_CSP_I420;
+        x264Param.i_fps_num     = fpsNum;
+        x264Param.i_fps_den     = fpsDen;
+        x264Param.i_timebase_num = fpsDen;
+        x264Param.i_timebase_den = fpsNum;
+        x264Param.b_vfr_input   = 0;
+        x264Param.b_repeat_headers = 0;   // we embed SPS/PPS via extradata
+        x264Param.b_annexb      = 1;      // default: start codes
+
+        // Rate control — mirror pixel path: CRF 18 default, CQP when qpOverride set.
+        x264Param.rc.i_rc_method = X264_RC_CRF;
+        x264Param.rc.f_rf_constant = 18.0f;
+        if (m_globalParams.qpOverride >= 0) {
+            x264Param.rc.i_rc_method  = X264_RC_CQP;
+            x264Param.rc.i_qp_constant = m_globalParams.qpOverride;
+        }
+        if (m_globalParams.qpMin >= 0) x264Param.rc.i_qp_min = m_globalParams.qpMin;
+        if (m_globalParams.qpMax >= 0) x264Param.rc.i_qp_max = m_globalParams.qpMax;
+
+        // Frame structure / GOP (match pixel path exactly so A/B comparisons work)
+        const bool killI = m_globalParams.killIFrames;
+        x264Param.i_bframe = killI ? 0
+                           : (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
+        const int gopSize = (killI || m_globalParams.gopSize == 0) ? 9999
+                          : (m_globalParams.gopSize > 0) ? m_globalParams.gopSize : 250;
+        x264Param.i_keyint_max = gopSize;
+        x264Param.i_keyint_min = gopSize;
+        x264Param.i_scenecut_threshold = m_globalParams.scenecut ? 40 : 0;
+        if (killI) x264Param.i_bframe_adaptive = 0;
+
+        if (m_globalParams.refFrames > 0)
+            x264Param.i_frame_reference = m_globalParams.refFrames;
+        if (m_globalParams.cabacDisable)
+            x264Param.b_cabac = 0;
+        if (m_globalParams.noDeblock)
+            x264Param.b_deblocking_filter = 0;
+        if (m_globalParams.mbTreeDisable)
+            x264Param.rc.b_mb_tree = 0;
+        if (m_globalParams.aqMode >= 0)
+            x264Param.rc.i_aq_mode = m_globalParams.aqMode;
+        if (m_globalParams.aqStrength >= 0.0f)
+            x264Param.rc.f_aq_strength = m_globalParams.aqStrength;
+        if (m_globalParams.trellis >= 0)
+            x264Param.analyse.i_trellis = m_globalParams.trellis;
+        if (m_globalParams.psyRD >= 0.0f)
+            x264Param.analyse.f_psy_rd = m_globalParams.psyRD;
+        if (m_globalParams.psyTrellis >= 0.0f)
+            x264Param.analyse.f_psy_trellis = m_globalParams.psyTrellis;
+        if (m_globalParams.noFastPSkip)
+            x264Param.analyse.b_fast_pskip = 0;
+        if (m_globalParams.noDctDecimate)
+            x264Param.analyse.b_dct_decimate = 0;
+        if (m_globalParams.rcLookahead >= 0)
+            x264Param.rc.i_lookahead = m_globalParams.rcLookahead;
+        if (m_globalParams.qcompEnabled)
+            x264Param.rc.f_qcompress = m_globalParams.qcomp;
+        if (m_globalParams.ipratioEnabled)
+            x264Param.rc.f_ip_factor = m_globalParams.ipratio;
+        if (m_globalParams.pbratioEnabled)
+            x264Param.rc.f_pb_factor = m_globalParams.pbratio;
+        if (m_globalParams.qblurEnabled)
+            x264Param.rc.f_qblur = m_globalParams.qblur;
+
+        // Partition Mode — per-frame-type MB Type dropdowns map to subsets
+        // of x264_param_t.analyse.inter bit flags:
+        //   X264_ANALYSE_I4x4       — intra 4×4 (from I-frame dropdown)
+        //   X264_ANALYSE_I8x8       — intra 8×8 (from I-frame dropdown;
+        //                             requires b_transform_8x8)
+        //   X264_ANALYSE_PSUB16x16  — P 8×8 sub-partitions (from P-frame dropdown)
+        //   X264_ANALYSE_PSUB8x8    — P 4×4 inside P 8×8 (from P-frame dropdown)
+        //   X264_ANALYSE_BSUB16x16  — B 8×8 sub-partitions (from B-frame dropdown)
+        //
+        // Build only when any dropdown is non-default.  -1 dropdown values
+        // default to x264's natural per-slice-type default, so a single
+        // non-default dropdown doesn't unintentionally restrict the others.
+        // Mirrors the FFmpeg-pixel-path construction in runTransform().
+        if (m_globalParams.iFrameMbType >= 0 ||
+            m_globalParams.pFrameMbType >= 0 ||
+            m_globalParams.bFrameMbType >= 0)
+        {
+            uint32_t flags = 0;
+            // Intra — default: i8x8 + i4x4
+            int iEff = (m_globalParams.iFrameMbType < 0) ? 2 : m_globalParams.iFrameMbType;
+            if (iEff >= 1) flags |= X264_ANALYSE_I8x8;
+            if (iEff >= 2) flags |= X264_ANALYSE_I4x4;
+            // P inter — default: PSUB16x16 (p8x8)
+            int pEff = (m_globalParams.pFrameMbType < 0) ? 1 : m_globalParams.pFrameMbType;
+            if (pEff >= 1) flags |= X264_ANALYSE_PSUB16x16;
+            if (pEff >= 2) flags |= X264_ANALYSE_PSUB8x8;
+            // B inter — default: BSUB16x16 (b8x8)
+            int bEff = (m_globalParams.bFrameMbType < 0) ? 1 : m_globalParams.bFrameMbType;
+            if (bEff >= 1) flags |= X264_ANALYSE_BSUB16x16;
+            x264Param.analyse.inter = flags;
+            // i8x8 requires 8×8 DCT transform
+            if ((flags & X264_ANALYSE_I8x8) || m_globalParams.use8x8DCT)
+                x264Param.analyse.b_transform_8x8 = 1;
+        }
+
+        x264_param_apply_profile(&x264Param, "high");
+
+        x264Enc = x264_encoder_open(&x264Param);
+        if (!x264Enc) { errorMsg = "x264_encoder_open failed"; goto cleanup; }
+    }
+
+    // ── Open output container & build stream from x264 SPS/PPS headers ────
+    if (avformat_alloc_output_context2(&ofmt, nullptr, "mp4",
+                                       tempPath.toUtf8().constData()) < 0) {
+        errorMsg = "Cannot alloc output context"; goto cleanup;
+    }
+    {
+        AVStream* outStream = avformat_new_stream(ofmt, nullptr);
+        outStream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        outStream->codecpar->codec_id   = AV_CODEC_ID_H264;
+        outStream->codecpar->format     = AV_PIX_FMT_YUV420P;
+        outStream->codecpar->width      = decCtx->width;
+        outStream->codecpar->height     = decCtx->height;
+        // x264's i_fps_* / i_timebase_* are uint32_t; AVRational uses int.
+        outStream->time_base            = AVRational{(int)x264Param.i_timebase_num,
+                                                     (int)x264Param.i_timebase_den};
+        outStream->avg_frame_rate       = AVRational{(int)x264Param.i_fps_num,
+                                                     (int)x264Param.i_fps_den};
+
+        // Pull SPS/PPS out of x264 and build avcC extradata for MP4 muxer.
+        x264_nal_t* hdrs  = nullptr;
+        int         iNal  = 0;
+        int headerSize = x264_encoder_headers(x264Enc, &hdrs, &iNal);
+        if (headerSize <= 0 || !hdrs) {
+            errorMsg = "x264_encoder_headers failed"; goto cleanup;
+        }
+
+        // Find SPS and PPS NALs (type 7 and 8, respectively).  Strip Annex-B
+        // start codes and build an avcC box as required by movenc.
+        const uint8_t* spsPayload = nullptr; int spsSize = 0;
+        const uint8_t* ppsPayload = nullptr; int ppsSize = 0;
+        for (int i = 0; i < iNal; i++) {
+            const uint8_t* p = hdrs[i].p_payload;
+            int            n = hdrs[i].i_payload;
+            // Skip Annex-B start code
+            int sc = 0;
+            if (n >= 4 && p[0]==0 && p[1]==0 && p[2]==0 && p[3]==1) sc = 4;
+            else if (n >= 3 && p[0]==0 && p[1]==0 && p[2]==1) sc = 3;
+            const uint8_t* nalBody = p + sc;
+            int nalBodySize = n - sc;
+            int nalType = nalBody[0] & 0x1F;
+            if (nalType == 7) { spsPayload = nalBody; spsSize = nalBodySize; }
+            else if (nalType == 8) { ppsPayload = nalBody; ppsSize = nalBodySize; }
+        }
+        if (!spsPayload || !ppsPayload || spsSize < 4) {
+            errorMsg = "Missing SPS/PPS from x264 headers"; goto cleanup;
+        }
+
+        QByteArray avcC;
+        avcC.append((char)0x01);                    // configurationVersion
+        avcC.append((char)spsPayload[1]);           // AVCProfileIndication
+        avcC.append((char)spsPayload[2]);           // profile_compatibility
+        avcC.append((char)spsPayload[3]);           // AVCLevelIndication
+        avcC.append((char)0xFF);                    // 6 reserved bits + NALU len-1 = 3
+        avcC.append((char)0xE1);                    // 3 reserved bits + numOfSPS = 1
+        avcC.append((char)((spsSize >> 8) & 0xFF));
+        avcC.append((char)(spsSize & 0xFF));
+        avcC.append(reinterpret_cast<const char*>(spsPayload), spsSize);
+        avcC.append((char)0x01);                    // numOfPPS = 1
+        avcC.append((char)((ppsSize >> 8) & 0xFF));
+        avcC.append((char)(ppsSize & 0xFF));
+        avcC.append(reinterpret_cast<const char*>(ppsPayload), ppsSize);
+
+        outStream->codecpar->extradata = (uint8_t*)av_mallocz(
+            avcC.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        outStream->codecpar->extradata_size = avcC.size();
+        std::memcpy(outStream->codecpar->extradata, avcC.constData(), avcC.size());
+    }
+
+    if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&ofmt->pb, tempPath.toUtf8().constData(),
+                      AVIO_FLAG_WRITE) < 0) {
+            errorMsg = "Cannot open output file"; goto cleanup;
+        }
+    }
+    if (avformat_write_header(ofmt, nullptr) < 0) {
+        errorMsg = "avformat_write_header failed"; goto cleanup;
+    }
+
+    // ── Initialize x264 picture (i_csp + i_plane; planes/strides per frame) ─
+    x264_picture_init(&picIn);
+    picIn.img.i_csp   = X264_CSP_I420;
+    picIn.img.i_plane = 3;
+
+    frame = av_frame_alloc();
+    rpkt  = av_packet_alloc();
+
+    {
+        const int width   = decCtx->width;
+        const int height  = decCtx->height;
+        const int mbCols  = (width  + 15) / 16;
+        const int mbRows  = (height + 15) / 16;
+        const int mbCount = mbCols * mbRows;
+
+        // Cascade pre-expansion — identical logic to runTransform() so
+        // bitstream edits respect cascadeLen / cascadeDecay too.
+        MBEditMap activeEdits = m_mbEdits;
+        for (auto it = m_mbEdits.constBegin(); it != m_mbEdits.constEnd(); ++it) {
+            const FrameMBParams& src = it.value();
+            if (src.cascadeLen <= 0) continue;
+            for (int k = 1; k <= src.cascadeLen; ++k) {
+                int ci = it.key() + k;
+                if (ci >= m_totalFrames) break;
+                if (activeEdits.contains(ci)) continue;
+                float f = 1.0f - (src.cascadeDecay / 100.0f)
+                               * ((float)k / (float)src.cascadeLen);
+                f = qBound(0.0f, f, 1.0f);
+                if (f < 0.01f) break;
+                FrameMBParams c;
+                c.selectedMBs  = src.selectedMBs;
+                c.spillRadius  = src.spillRadius;
+                c.refDepth     = 1;
+                c.ghostBlend   = qMin(100, (int)(100.0f * f));
+                c.qpDelta      = 51;
+                // Propagate bs* seed values at decayed intensity (probability-like
+                // knobs scale by f; direct-value knobs pass through unchanged on
+                // the cascade seed frame, off on downstream cascade frames).
+                c.bsCbpZero    = (int)(src.bsCbpZero   * f);
+                c.bsForceSkip  = (int)(src.bsForceSkip * f);
+                activeEdits[ci] = c;
+            }
+        }
+
+        AVStream* outStream = ofmt->streams[0];
+        int frameIdx = 0;
+
+        // Helper: encode one x264_picture_t and mux the resulting NAL as an
+        // AVCC-format AVPacket (replacing Annex-B start codes with 4-byte
+        // big-endian length prefixes).  Works for both real frames and flush.
+        auto encodeAndMux = [&](x264_picture_t* inPic) {
+            x264_nal_t* nal  = nullptr;
+            int         iNal = 0;
+            int frameSize = x264_encoder_encode(x264Enc, &nal, &iNal, inPic, &picOut);
+            if (frameSize <= 0 || !nal) return;
+
+            // Convert Annex-B byte stream → AVCC length-prefixed.  x264 emits all
+            // output NALs back-to-back into nal[0].p_payload..nal[iNal-1].p_payload
+            // as one contiguous buffer of size frameSize.  We walk it by NAL.
+            QByteArray avccPkt;
+            avccPkt.reserve(frameSize + iNal * 4);
+            for (int i = 0; i < iNal; i++) {
+                const uint8_t* p = nal[i].p_payload;
+                int n = nal[i].i_payload;
+                int sc = 0;
+                if (n >= 4 && p[0]==0 && p[1]==0 && p[2]==0 && p[3]==1) sc = 4;
+                else if (n >= 3 && p[0]==0 && p[1]==0 && p[2]==1) sc = 3;
+                int body = n - sc;
+                uint8_t len4[4] = {
+                    (uint8_t)((body >> 24) & 0xFF),
+                    (uint8_t)((body >> 16) & 0xFF),
+                    (uint8_t)((body >>  8) & 0xFF),
+                    (uint8_t)( body        & 0xFF)
+                };
+                avccPkt.append(reinterpret_cast<const char*>(len4), 4);
+                avccPkt.append(reinterpret_cast<const char*>(p + sc), body);
+            }
+            AVPacket* wpkt = av_packet_alloc();
+            if (av_new_packet(wpkt, avccPkt.size()) < 0) {
+                av_packet_free(&wpkt); return;
+            }
+            std::memcpy(wpkt->data, avccPkt.constData(), avccPkt.size());
+            wpkt->stream_index = 0;
+            wpkt->pts = picOut.i_pts;
+            wpkt->dts = picOut.i_dts;
+            if (picOut.b_keyframe) wpkt->flags |= AV_PKT_FLAG_KEY;
+            av_packet_rescale_ts(wpkt,
+                AVRational{(int)x264Param.i_timebase_num,
+                           (int)x264Param.i_timebase_den},
+                outStream->time_base);
+            av_interleaved_write_frame(ofmt, wpkt);
+            av_packet_free(&wpkt);
+        };
+
+        // Helper: fill pic.prop.*_override arrays from this frame's FrameMBParams.
+        // Every array is heap-allocated with calloc/malloc and x264 takes
+        // ownership via the *_free = std::free callback.  After
+        // x264_encoder_encode returns, we reset the picIn.prop pointers to
+        // nullptr before the next frame so we never double-assign.
+        auto setupOverrides = [&](const FrameMBParams* p) {
+            // Reset all pointers first (safe default for frames with no edits).
+            picIn.prop.cbp_override         = nullptr;
+            picIn.prop.cbp_override_free    = nullptr;
+            picIn.prop.mb_skip_override     = nullptr;
+            picIn.prop.mb_skip_override_free= nullptr;
+            picIn.prop.mb_type_override     = nullptr;
+            picIn.prop.mb_type_override_free= nullptr;
+            picIn.prop.intra_mode_override  = nullptr;
+            picIn.prop.intra_mode_override_free = nullptr;
+            picIn.prop.mvd_x_override       = nullptr;
+            picIn.prop.mvd_y_override       = nullptr;
+            picIn.prop.mvd_active_override  = nullptr;
+            picIn.prop.mvd_x_override_free  = nullptr;
+            picIn.prop.mvd_y_override_free  = nullptr;
+            picIn.prop.mvd_active_override_free = nullptr;
+            picIn.prop.dct_scale_override   = nullptr;
+            picIn.prop.dct_scale_override_free = nullptr;
+            if (!p) return;
+
+            // Resolve selection set: empty = global (whole frame), else expand
+            // by spillRadius so the bitstream edit matches the visual footprint.
+            QSet<int> fullFrame;
+            const QSet<int>* base = &p->selectedMBs;
+            if (p->selectedMBs.isEmpty()) {
+                fullFrame.reserve(mbCount);
+                for (int i = 0; i < mbCount; ++i) fullFrame.insert(i);
+                base = &fullFrame;
+            }
+            const QSet<int>& mbs = (p->spillRadius > 0)
+                ? expandedMBs(*base, p->spillRadius, mbCols, mbRows)
+                : *base;
+
+            // CBP Zero — probability-per-MB (0..100).
+            if (p->bsCbpZero > 0) {
+                uint8_t* arr = (uint8_t*)std::calloc(mbCount, 1);
+                for (int mbi : mbs)
+                    if (mbi >= 0 && mbi < mbCount &&
+                        (std::rand() % 100) < p->bsCbpZero) arr[mbi] = 1;
+                picIn.prop.cbp_override      = arr;
+                picIn.prop.cbp_override_free = std::free;
+            }
+            // Force Skip — probability-per-MB (0..100).
+            if (p->bsForceSkip > 0) {
+                uint8_t* arr = (uint8_t*)std::calloc(mbCount, 1);
+                for (int mbi : mbs)
+                    if (mbi >= 0 && mbi < mbCount &&
+                        (std::rand() % 100) < p->bsForceSkip) arr[mbi] = 1;
+                picIn.prop.mb_skip_override      = arr;
+                picIn.prop.mb_skip_override_free = std::free;
+            }
+            // Force MB Type (per-MB) — REMOVED.  Previously wrote the
+            // x264 mb_type_override array here based on p->bsMbType.  Control
+            // migrated to the encoder-wide --partitions parameter
+            // (GlobalEncodeParams::partitionMode), which is set on the x264
+            // param struct at encoder-open time.  The x264 mb_type_override
+            // hook in our fork remains as dead code; we simply never populate
+            // the array.  p->bsMbType is left at its -1 default and ignored.
+            // Force Intra Mode — 0..3 (V/H/DC/Plane) for I_16x16 only.
+            if (p->bsIntraMode >= 0 && p->bsIntraMode <= 3) {
+                int8_t* arr = (int8_t*)std::malloc(mbCount);
+                std::memset(arr, 0xFF /* -1 */, mbCount);
+                for (int mbi : mbs)
+                    if (mbi >= 0 && mbi < mbCount) arr[mbi] = (int8_t)p->bsIntraMode;
+                picIn.prop.intra_mode_override      = arr;
+                picIn.prop.intra_mode_override_free = std::free;
+            }
+            // MVD Injection — UI values are whole pixels; x264 expects q-pel.
+            if (p->bsMvdX != 0 || p->bsMvdY != 0) {
+                int16_t* xArr = (int16_t*)std::calloc(mbCount, sizeof(int16_t));
+                int16_t* yArr = (int16_t*)std::calloc(mbCount, sizeof(int16_t));
+                uint8_t* act  = (uint8_t*)std::calloc(mbCount, 1);
+                int16_t qx = (int16_t)(p->bsMvdX * 4);
+                int16_t qy = (int16_t)(p->bsMvdY * 4);
+                for (int mbi : mbs) {
+                    if (mbi < 0 || mbi >= mbCount) continue;
+                    xArr[mbi] = qx;
+                    yArr[mbi] = qy;
+                    act [mbi] = 1;
+                }
+                picIn.prop.mvd_x_override           = xArr;
+                picIn.prop.mvd_y_override           = yArr;
+                picIn.prop.mvd_active_override      = act;
+                picIn.prop.mvd_x_override_free      = std::free;
+                picIn.prop.mvd_y_override_free      = std::free;
+                picIn.prop.mvd_active_override_free = std::free;
+            }
+            // DCT Scale — 100 = no-op (sentinel-coded as 255).
+            if (p->bsDctScale != 100) {
+                uint8_t* arr = (uint8_t*)std::malloc(mbCount);
+                std::memset(arr, 255, mbCount);  // 255 = no override
+                uint8_t scale = (uint8_t)qBound(0, p->bsDctScale, 200);
+                for (int mbi : mbs)
+                    if (mbi >= 0 && mbi < mbCount) arr[mbi] = scale;
+                picIn.prop.dct_scale_override      = arr;
+                picIn.prop.dct_scale_override_free = std::free;
+            }
+        };
+
+        while (av_read_frame(ifmt, rpkt) >= 0) {
+            if (rpkt->stream_index == vsIdx) {
+                if (avcodec_send_packet(decCtx, rpkt) == 0) {
+                    while (avcodec_receive_frame(decCtx, frame) == 0) {
+                        // Pixel-domain corruption on the decoded YUV first —
+                        // bitstream overrides then shape how x264 encodes it.
+                        applyMBEdits(frame, frameIdx, mbCols, mbRows,
+                                     refBuf, activeEdits);
+
+                        // Point picIn at the decoded frame's planes.
+                        for (int p = 0; p < 3; p++) {
+                            picIn.img.plane[p]    = frame->data[p];
+                            picIn.img.i_stride[p] = frame->linesize[p];
+                        }
+                        picIn.i_pts = frameIdx;
+
+                        // Populate per-MB override arrays for this frame.
+                        const FrameMBParams* eParams =
+                            activeEdits.contains(frameIdx)
+                                ? &activeEdits[frameIdx] : nullptr;
+                        setupOverrides(eParams);
+
+                        encodeAndMux(&picIn);
+
+                        // Ring buffer — store the decoded (post-edit) frame so
+                        // subsequent frames can ghost-blend / mv-drift against it.
+                        AVFrame* bufFrame = av_frame_clone(frame);
+                        if (refBuf[REF_BUF_SIZE - 1])
+                            av_frame_free(&refBuf[REF_BUF_SIZE - 1]);
+                        for (int ri = REF_BUF_SIZE - 1; ri > 0; --ri)
+                            refBuf[ri] = refBuf[ri - 1];
+                        refBuf[0] = bufFrame;
+
+                        frameIdx++;
+                        if (m_totalFrames > 0)
+                            emit progress(frameIdx, m_totalFrames);
+                        av_frame_unref(frame);
+                    }
+                }
+            }
+            av_packet_unref(rpkt);
+        }
+
+        // Flush x264 — pump nulls until no delayed frames remain.
+        while (x264_encoder_delayed_frames(x264Enc))
+            encodeAndMux(nullptr);
+    }
+
+    av_write_trailer(ofmt);
+    ok = true;
+
+cleanup:
+    for (int i = 0; i < refBuf.size(); ++i)
+        if (refBuf[i]) av_frame_free(&refBuf[i]);
+
+    if (rpkt)    av_packet_free(&rpkt);
+    if (frame)   av_frame_free(&frame);
+    if (decCtx)  avcodec_free_context(&decCtx);
+    if (x264Enc) x264_encoder_close(x264Enc);
+    if (ofmt && !(ofmt->oformat->flags & AVFMT_NOFILE))
+        avio_closep(&ofmt->pb);
+    if (ofmt)    avformat_free_context(ofmt);
+    if (ifmt)    avformat_close_input(&ifmt);
+
+    if (ok) {
+        if (!QFile::remove(m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot remove original file for replacement";
+            QFile::remove(tempPath);
+        } else if (!QFile::rename(tempPath, m_videoPath)) {
+            ok = false;
+            errorMsg = "Cannot rename temp file to original path";
+        }
+    } else {
+        QFile::remove(tempPath);
+    }
+
+    ControlLogger::instance().logApplyCompleted(ok);
+    emit done(ok, errorMsg);
+}
+
+
 // ── Reorder frames ────────────────────────────────────────────────────────
 // Decodes all frames into RAM, re-encodes them in the requested display order.
 // m_frameIndices must be [sourceIdx, insertBeforeIdx].
@@ -1186,6 +1791,8 @@ splice_cleanup:
 void FrameTransformerWorker::runReorderFrames()
 {
     ControlLogger::instance().logApplyStarted(m_totalFrames, 0);
+    ControlLogger::instance().logRenderPath(
+        "REORDER PATH (full decode → re-encode with new frame order)");
 
     if (m_frameIndices.size() < 2) {
         emit done(false, "ReorderFrames: frameIndices must be [source, insertBefore]");
@@ -1424,8 +2031,24 @@ void FrameTransformerWorker::run()
         return;
     }
 
+    // LaMoshPit-Edge: bitstream-surgery render path.
+    // When the user has set any per-MB bitstream knob (CBP Zero, Force Skip,
+    // Force MB Type, Force Intra Mode, MVD Injection, DCT Scale), route to
+    // runBitstreamEdit() which calls our forked libx264 directly so the
+    // override arrays in x264_picture_t.prop actually reach the encoder.
+    // Pixel-domain knobs on the same frames are still applied (they act on
+    // the decoded YUV before it is fed to x264).  For now this path is
+    // scoped to MBEditOnly; combining with force-type or splice operations
+    // is future work.
+    if (m_targetType == MBEditOnly && anyBitstreamEdits(m_mbEdits)) {
+        runBitstreamEdit();
+        return;
+    }
+
     // Log Apply start — records total frames and how many carry edits.
     ControlLogger::instance().logApplyStarted(m_totalFrames, m_mbEdits.size());
+    ControlLogger::instance().logRenderPath(
+        "PIXEL-DOMAIN PATH (FFmpeg-wrapped libx264)");
 
     const QString tempPath = m_videoPath + ".xform_tmp.mp4";
     QString errorMsg;
@@ -1580,11 +2203,32 @@ void FrameTransformerWorker::run()
             x264p += QString("merange=%1:").arg(m_globalParams.meRange);
         if (m_globalParams.subpelRef >= 0)
             x264p += QString("subme=%1:").arg(m_globalParams.subpelRef);
-        // Partitions
-        if (m_globalParams.partitionMode >= 0) {
-            const char* parts[] = {"none","p8x8","all","all,p4x4,b8x8,i8x8,i4x4"};
-            int pi = qBound(0, m_globalParams.partitionMode, 3);
-            x264p += QString("partitions=%1:").arg(parts[pi]);
+        // Partitions — build the x264 --partitions string from the three
+        // per-frame-type MB Type dropdowns (iFrameMbType / pFrameMbType /
+        // bFrameMbType).  Each is -1 "default" or 0..N for specific
+        // subdivision restriction levels.  When ALL three are default, we
+        // don't emit --partitions at all and x264 uses its natural default
+        // (p8x8,b8x8,i8x8,i4x4 in the medium preset).  Otherwise, each -1
+        // defaults to the x264-natural value for that slice type, so
+        // changing just one dropdown doesn't inadvertently restrict others.
+        if (m_globalParams.iFrameMbType >= 0 ||
+            m_globalParams.pFrameMbType >= 0 ||
+            m_globalParams.bFrameMbType >= 0)
+        {
+            QStringList parts;
+            // Intra — x264 default is i8x8 + i4x4
+            int iEff = (m_globalParams.iFrameMbType < 0) ? 2 : m_globalParams.iFrameMbType;
+            if (iEff >= 1) parts << "i8x8";
+            if (iEff >= 2) parts << "i4x4";
+            // P inter — x264 default is p8x8 (no p4x4)
+            int pEff = (m_globalParams.pFrameMbType < 0) ? 1 : m_globalParams.pFrameMbType;
+            if (pEff >= 1) parts << "p8x8";
+            if (pEff >= 2) parts << "p4x4";
+            // B inter — x264 default is b8x8
+            int bEff = (m_globalParams.bFrameMbType < 0) ? 1 : m_globalParams.bFrameMbType;
+            if (bEff >= 1) parts << "b8x8";
+            x264p += QString("partitions=%1:")
+                .arg(parts.isEmpty() ? QString("none") : parts.join(','));
         }
         x264p += QString("8x8dct=%1:").arg(m_globalParams.use8x8DCT ? 1 : 0);
         // B-frame prediction

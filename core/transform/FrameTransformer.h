@@ -70,6 +70,17 @@ private:
     // frameIndices must be [sourceIdx, insertBeforeIdx].
     void runReorderFrames();
 
+    // LaMoshPit-Edge: parallel render path for true bitstream-level MB edits.
+    // Bypasses FFmpeg's libx264 wrapper and calls our forked libx264 (x264-
+    // lamoshpit) directly so per-MB overrides in pic.prop (cbp_override,
+    // mb_skip_override, mb_type_override, intra_mode_override, mvd_x/y/active_
+    // override, dct_scale_override) reach the encoder.  Decodes via libavcodec,
+    // encodes via libx264 C API, muxes via libavformat.  Invoked from run()
+    // when m_targetType == MBEditOnly AND any frame has a bitstream knob set
+    // (bsCbpZero, bsForceSkip, bsMbType, bsIntraMode, bsMvdX|Y, bsDctScale).
+    // Returns via the same done(bool, QString) signal as the pixel path.
+    void runBitstreamEdit();
+
     QString            m_videoPath;
     QVector<int>       m_frameIndices;
     TargetType         m_targetType;

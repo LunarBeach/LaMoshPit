@@ -800,6 +800,25 @@ void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, 
 
 void x264_me_refine_qpel( x264_t *h, x264_me_t *m )
 {
+    /* LaMoshPit-Edge: preserve forced MV from MVD Injection.  When the MB
+     * has mvd_active_override set, the top-of-mb_analyse_inter_p16x16 hook
+     * already populated m->mv with the user's forced MV and set m->cost = 1
+     * so the P_L0 partition wins the final type selection.  Subsequent qpel
+     * refinement would search around our forced MV and OVERWRITE it with
+     * whatever sub-pel position x264 finds cheapest — destroying the datamosh
+     * effect the user asked for.  Skip refinement entirely for flagged MBs.
+     *
+     * Only applicable on P-slices (where mb_analyse_inter_p16x16 runs).  On
+     * I/B slices the override arrays are never consulted so this check is
+     * a no-op. */
+    if( h->fdec->mvd_active_override
+        && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
+    {
+        if( m->i_pixel <= PIXEL_8x8 )
+            m->cost -= m->i_ref_cost;
+        return;
+    }
+
     int hpel = subpel_iterations[h->mb.i_subpel_refine][0];
     int qpel = subpel_iterations[h->mb.i_subpel_refine][1];
 
@@ -1232,6 +1251,16 @@ void x264_me_refine_bidir_rd( x264_t *h, x264_me_t *m0, x264_me_t *m1, int i_wei
 
 void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int i_list )
 {
+    /* LaMoshPit-Edge: preserve forced MV from MVD Injection.  Same rationale
+     * as the guard in x264_me_refine_qpel above — when the MB is flagged,
+     * the qpel RD refinement would wander off our forced MV and replace it
+     * with a refined pick, defeating the datamosh effect.  Early-return
+     * before any cost evaluation so the cache mv (already populated by our
+     * hook via x264_macroblock_cache_mv_ptr) stays intact. */
+    if( h->fdec->mvd_active_override
+        && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
+        return;
+
     int16_t *cache_mv = h->mb.cache.mv[i_list][x264_scan8[i4]];
     const uint16_t *p_cost_mvx, *p_cost_mvy;
     const int bw = x264_pixel_size[m->i_pixel].w;
