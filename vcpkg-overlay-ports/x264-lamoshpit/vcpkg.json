@@ -1,0 +1,41 @@
+{
+  "name": "x264-lamoshpit",
+  "version": "0.164.3108",
+  "port-version": 1,
+  "description": "LaMoshPit-Edge fork of x264 with per-MB CBP override hooks for bitstream-level datamosh edits.",
+  "homepage": "https://github.com/LunarBeach/LaMoshPit",
+  "license": "GPL-2.0-or-later",
+  "supports": "!xbox",
+  "dependencies": [
+    {
+      "name": "vcpkg-make",
+      "host": true
+    }
+  ],
+  "default-features": [
+    {
+      "name": "asm",
+      "platform": "!(arm32 & windows)"
+    },
+    {
+      "name": "gpl",
+      "platform": "!(arm32 & windows)"
+    }
+  ],
+  "features": {
+    "asm": {
+      "description": "Enable platform-specific assembly optimizations",
+      "supports": "!(arm32 & windows)"
+    },
+    "chroma-format-all": {
+      "description": "Output all chroma formats"
+    },
+    "gpl": {
+      "description": "Allow use of GPL code, the resulting libs and binaries will be under GPL"
+    },
+    "tool": {
+      "description": "Build the command line tool",
+      "supports": "!uwp"
+    }
+  }
+}
