@@ -942,6 +942,47 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
     else
         h->mb.i_cbp_chroma = 0;
 
+    /* LaMoshPit-Edge DCT Scale override: scale quantized residual coefficients.
+     *
+     * Sentinel 255 = no override. Otherwise the value is a percent-scale
+     * (0..200) applied to all coefficient arrays:
+     *   0   = zero all residual (visually similar to CBP Zero, but the CBP
+     *         flags are left intact so the bitstream still emits the MB
+     *         residual headers with zero values — a different artifact than
+     *         true CBP=0 which omits the residual structure entirely)
+     *   100 = unchanged
+     *   200 = doubled (clamped to dctcoef range by the final cast)
+     *
+     * Placement: after DCT/quant have run for both luma and chroma, before
+     * CBP is committed and before the CBP-zero override. If DCT Scale zeros
+     * a coefficient that was non-zero, the CBP still reports the block as
+     * having residual — the bitstream emits zero-coded VLCs for those
+     * coefficients, which is valid (just larger than an optimal encode of
+     * the same frame). Expected datamosh effect: muted / ghostly residual.
+     *
+     * Caveat: scales ALL coefficients uniformly across plane/block/DC/AC.
+     * Per-block selective scaling (e.g., only AC, only DC) is future work. */
+    if( h->fdec->dct_scale_override && h->fdec->dct_scale_override[h->mb.i_mb_xy] != 255 )
+    {
+        int scale_pct = h->fdec->dct_scale_override[h->mb.i_mb_xy];
+        /* Scale luma16x16 DC (3 planes × 16 coefficients) */
+        for( int p = 0; p < 3; p++ )
+            for( int i = 0; i < 16; i++ )
+                h->dct.luma16x16_dc[p][i] = (dctcoef)(h->dct.luma16x16_dc[p][i] * scale_pct / 100);
+        /* Scale luma 4x4 blocks — up to 48 blocks (16 per plane × 3 planes) */
+        for( int b = 0; b < 16 * 3; b++ )
+            for( int i = 0; i < 16; i++ )
+                h->dct.luma4x4[b][i] = (dctcoef)(h->dct.luma4x4[b][i] * scale_pct / 100);
+        /* Scale luma 8x8 blocks — up to 12 blocks (4 per plane × 3 planes) */
+        for( int b = 0; b < 4 * 3; b++ )
+            for( int i = 0; i < 64; i++ )
+                h->dct.luma8x8[b][i] = (dctcoef)(h->dct.luma8x8[b][i] * scale_pct / 100);
+        /* Scale chroma DC — up to 2 planes × 8 coefficients */
+        for( int p = 0; p < 2; p++ )
+            for( int i = 0; i < 8; i++ )
+                h->dct.chroma_dc[p][i] = (dctcoef)(h->dct.chroma_dc[p][i] * scale_pct / 100);
+    }
+
     /* LaMoshPit-Edge CBP override: force CBP=0 on flagged MBs.
      *
      * Zeroing i_cbp_luma and i_cbp_chroma here suppresses all residual emission
