@@ -849,6 +849,19 @@ typedef struct x264_image_properties_t
     /* In: optional callback to free cbp_override when used. */
     void (*cbp_override_free)( void* );
 
+    /* LaMoshPit-Edge extension: per-MB force-skip override.
+     * In: optional array of uint8_t, one per macroblock in raster scan order.
+     *     For each MB where the value is non-zero, the encoder forces the
+     *     macroblock to a skip type (P_SKIP for P-slices, B_SKIP for B-slices).
+     *     On I-slices this override is silently ignored (skip does not exist
+     *     for I-slices).  Bypasses RD analysis entirely for flagged MBs —
+     *     x264 emits a skip macroblock with predicted motion, ref 0, and
+     *     zero residual.  Stronger guarantee than CBP-zero since MV bits
+     *     are also suppressed. */
+    uint8_t *mb_skip_override;
+    /* In: optional callback to free mb_skip_override when used. */
+    void (*mb_skip_override_free)( void* );
+
     /* The macroblock is constant and remains unchanged from the previous frame. */
     #define X264_MBINFO_CONSTANT   (1U<<0)
     /* More flags may be added in the future. */
