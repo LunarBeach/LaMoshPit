@@ -838,6 +838,17 @@ typedef struct x264_image_properties_t
     /* In: optional callback to free mb_info when used. */
     void (*mb_info_free)( void* );
 
+    /* LaMoshPit-Edge extension: per-MB CBP override.
+     * In: optional array of uint8_t, one per macroblock in raster scan order.
+     *     For each MB where the value is non-zero, the encoder forces
+     *     coded_block_pattern = 0 — all residual coefficient data is suppressed
+     *     from the bitstream for that MB.  May trigger natural x264 auto-conversion
+     *     to P_SKIP/B_SKIP when motion vectors match the predicted skip MV.
+     *     Purpose: deterministic "frozen prediction" datamosh effect on selected MBs. */
+    uint8_t *cbp_override;
+    /* In: optional callback to free cbp_override when used. */
+    void (*cbp_override_free)( void* );
+
     /* The macroblock is constant and remains unchanged from the previous frame. */
     #define X264_MBINFO_CONSTANT   (1U<<0)
     /* More flags may be added in the future. */
