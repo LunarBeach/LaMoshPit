@@ -3142,6 +3142,46 @@ cont:
             h->fdec->mb_skip_override = NULL;
             h->fdec->mb_skip_override_free = NULL;
         }
+
+        /* LaMoshPit-Edge: free mb_type_override, intra_mode_override, MVD
+         * injection arrays, and dct_scale_override buffers after the last
+         * thread is done reading them. */
+        if( h->fdec->mb_type_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->mb_type_override_free( h->fdec->mb_type_override );
+            h->fdec->mb_type_override = NULL;
+            h->fdec->mb_type_override_free = NULL;
+        }
+        if( h->fdec->intra_mode_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->intra_mode_override_free( h->fdec->intra_mode_override );
+            h->fdec->intra_mode_override = NULL;
+            h->fdec->intra_mode_override_free = NULL;
+        }
+        if( h->fdec->mvd_x_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->mvd_x_override_free( h->fdec->mvd_x_override );
+            h->fdec->mvd_x_override = NULL;
+            h->fdec->mvd_x_override_free = NULL;
+        }
+        if( h->fdec->mvd_y_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->mvd_y_override_free( h->fdec->mvd_y_override );
+            h->fdec->mvd_y_override = NULL;
+            h->fdec->mvd_y_override_free = NULL;
+        }
+        if( h->fdec->mvd_active_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->mvd_active_override_free( h->fdec->mvd_active_override );
+            h->fdec->mvd_active_override = NULL;
+            h->fdec->mvd_active_override_free = NULL;
+        }
+        if( h->fdec->dct_scale_override_free && (!h->param.b_sliced_threads || h->i_thread_idx == (h->param.i_threads-1)) )
+        {
+            h->fdec->dct_scale_override_free( h->fdec->dct_scale_override );
+            h->fdec->dct_scale_override = NULL;
+            h->fdec->dct_scale_override_free = NULL;
+        }
     }
 
     return 0;
@@ -3596,6 +3636,38 @@ int     x264_encoder_encode( x264_t *h,
     h->fdec->mb_skip_override_free = h->fenc->mb_skip_override_free;
     h->fenc->mb_skip_override = NULL;
     h->fenc->mb_skip_override_free = NULL;
+
+    /* LaMoshPit-Edge: hand off mb_type_override. */
+    h->fdec->mb_type_override = h->fenc->mb_type_override;
+    h->fdec->mb_type_override_free = h->fenc->mb_type_override_free;
+    h->fenc->mb_type_override = NULL;
+    h->fenc->mb_type_override_free = NULL;
+
+    /* LaMoshPit-Edge: hand off intra_mode_override. */
+    h->fdec->intra_mode_override = h->fenc->intra_mode_override;
+    h->fdec->intra_mode_override_free = h->fenc->intra_mode_override_free;
+    h->fenc->intra_mode_override = NULL;
+    h->fenc->intra_mode_override_free = NULL;
+
+    /* LaMoshPit-Edge: hand off MVD injection arrays. */
+    h->fdec->mvd_x_override = h->fenc->mvd_x_override;
+    h->fdec->mvd_y_override = h->fenc->mvd_y_override;
+    h->fdec->mvd_active_override = h->fenc->mvd_active_override;
+    h->fdec->mvd_x_override_free = h->fenc->mvd_x_override_free;
+    h->fdec->mvd_y_override_free = h->fenc->mvd_y_override_free;
+    h->fdec->mvd_active_override_free = h->fenc->mvd_active_override_free;
+    h->fenc->mvd_x_override = NULL;
+    h->fenc->mvd_y_override = NULL;
+    h->fenc->mvd_active_override = NULL;
+    h->fenc->mvd_x_override_free = NULL;
+    h->fenc->mvd_y_override_free = NULL;
+    h->fenc->mvd_active_override_free = NULL;
+
+    /* LaMoshPit-Edge: hand off DCT scale override. */
+    h->fdec->dct_scale_override = h->fenc->dct_scale_override;
+    h->fdec->dct_scale_override_free = h->fenc->dct_scale_override_free;
+    h->fenc->dct_scale_override = NULL;
+    h->fenc->dct_scale_override_free = NULL;
 
     h->fdec->i_pts = h->fenc->i_pts;
     if( h->frames.i_bframe_delay )

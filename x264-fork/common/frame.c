@@ -330,6 +330,20 @@ void x264_frame_delete( x264_frame_t *frame )
         /* LaMoshPit-Edge: free mb_skip_override if a callback was provided. */
         if( frame->mb_skip_override_free )
             frame->mb_skip_override_free( frame->mb_skip_override );
+        /* LaMoshPit-Edge: free mb_type_override, intra_mode_override,
+         * mvd_*, and dct_scale_override arrays via their callbacks. */
+        if( frame->mb_type_override_free )
+            frame->mb_type_override_free( frame->mb_type_override );
+        if( frame->intra_mode_override_free )
+            frame->intra_mode_override_free( frame->intra_mode_override );
+        if( frame->mvd_x_override_free )
+            frame->mvd_x_override_free( frame->mvd_x_override );
+        if( frame->mvd_y_override_free )
+            frame->mvd_y_override_free( frame->mvd_y_override );
+        if( frame->mvd_active_override_free )
+            frame->mvd_active_override_free( frame->mvd_active_override );
+        if( frame->dct_scale_override_free )
+            frame->dct_scale_override_free( frame->dct_scale_override );
         if( frame->extra_sei.sei_free )
         {
             for( int i = 0; i < frame->extra_sei.num_payloads; i++ )
@@ -420,6 +434,21 @@ int x264_frame_copy_picture( x264_t *h, x264_frame_t *dst, x264_picture_t *src )
     /* LaMoshPit-Edge: copy force-skip override pointer. */
     dst->mb_skip_override = src->prop.mb_skip_override;
     dst->mb_skip_override_free = src->prop.mb_skip_override_free;
+    /* LaMoshPit-Edge: copy mb_type_override and intra_mode_override. */
+    dst->mb_type_override = src->prop.mb_type_override;
+    dst->mb_type_override_free = src->prop.mb_type_override_free;
+    dst->intra_mode_override = src->prop.intra_mode_override;
+    dst->intra_mode_override_free = src->prop.intra_mode_override_free;
+    /* LaMoshPit-Edge: copy MVD injection arrays. */
+    dst->mvd_x_override = src->prop.mvd_x_override;
+    dst->mvd_y_override = src->prop.mvd_y_override;
+    dst->mvd_active_override = src->prop.mvd_active_override;
+    dst->mvd_x_override_free = src->prop.mvd_x_override_free;
+    dst->mvd_y_override_free = src->prop.mvd_y_override_free;
+    dst->mvd_active_override_free = src->prop.mvd_active_override_free;
+    /* LaMoshPit-Edge: copy DCT scale override. */
+    dst->dct_scale_override = src->prop.dct_scale_override;
+    dst->dct_scale_override_free = src->prop.dct_scale_override_free;
 
     uint8_t *pix[3];
     int stride[3];

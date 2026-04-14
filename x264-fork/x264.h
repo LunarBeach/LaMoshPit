@@ -862,6 +862,64 @@ typedef struct x264_image_properties_t
     /* In: optional callback to free mb_skip_override when used. */
     void (*mb_skip_override_free)( void* );
 
+    /* LaMoshPit-Edge extension: per-MB forced macroblock type.
+     * In: optional array of uint8_t, one per macroblock in raster scan order.
+     *     0 = no override (encoder chooses normally).  Non-zero values force:
+     *       1 = I_16x16 (single 16x16 intra partition)
+     *       2 = I_4x4  (16 separate 4x4 intra partitions)
+     *       3 = I_8x8  (4 separate 8x8 intra partitions)
+     *       4 = P_L0   (P-slice single 16x16 inter partition)
+     *       5 = P_8x8  (P-slice four 8x8 sub-partitions)
+     *     Out-of-range values are ignored.  Slice-type mismatches (e.g. forcing
+     *     P_L0 on an I-slice) are ignored.  RD analysis is short-circuited. */
+    uint8_t *mb_type_override;
+    /* In: optional callback to free mb_type_override when used. */
+    void (*mb_type_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB forced intra prediction mode.
+     * In: optional array of int8_t, one per macroblock in raster scan order.
+     *     -1 = no override.  Values 0..3 select the I_16x16 prediction mode:
+     *       0 = Vertical
+     *       1 = Horizontal
+     *       2 = DC
+     *       3 = Plane
+     *     Takes effect on MBs that are actually encoded as I_16x16 (either
+     *     naturally or via mb_type_override = 1).  For other MB types this
+     *     field is ignored (extending to I_4x4 / I_8x8 per-block modes or
+     *     chroma prediction modes is future work). */
+    int8_t *intra_mode_override;
+    /* In: optional callback to free intra_mode_override when used. */
+    void (*intra_mode_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB motion vector difference injection.
+     * In: optional arrays of int16_t, one entry per macroblock in raster scan
+     *     order, giving MV X and Y components in quarter-pel units.
+     *     When mvd_active_override[mb_xy] is non-zero, motion search is bypassed
+     *     for that MB and the MV is set exactly to (mvd_x, mvd_y).  Reference
+     *     index is forced to 0.  Applies to P-slices only (B-slice MVD injection
+     *     is future work).  Ignored for I-slices and for already-skipped MBs. */
+    int16_t *mvd_x_override;
+    int16_t *mvd_y_override;
+    uint8_t *mvd_active_override;   /* Non-zero = override mvd_x/y for this MB */
+    void (*mvd_x_override_free)( void* );
+    void (*mvd_y_override_free)( void* );
+    void (*mvd_active_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB DCT coefficient scaling.
+     * In: optional array of uint8_t, one per macroblock in raster scan order.
+     *     Value 255 (sentinel) = no override.  Values 0..200 are interpreted
+     *     as a percentage scale applied to all DCT residual coefficients
+     *     before quantization:
+     *       0   = zero all residual (similar effect to CBP-zero, but at a
+     *             different stage of the encode)
+     *       100 = coefficients unchanged
+     *       200 = coefficients doubled
+     *     Hook point: inside macroblock_encode_internal after forward DCT,
+     *     before quantization and entropy coding. */
+    uint8_t *dct_scale_override;
+    /* In: optional callback to free dct_scale_override when used. */
+    void (*dct_scale_override_free)( void* );
+
     /* The macroblock is constant and remains unchanged from the previous frame. */
     #define X264_MBINFO_CONSTANT   (1U<<0)
     /* More flags may be added in the future. */

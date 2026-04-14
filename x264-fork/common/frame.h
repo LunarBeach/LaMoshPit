@@ -187,6 +187,28 @@ typedef struct x264_frame
     uint8_t *mb_skip_override;
     void (*mb_skip_override_free)( void* );
 
+    /* LaMoshPit-Edge extension: per-MB forced macroblock type.
+     * Mirrors x264_image_properties_t.mb_type_override. */
+    uint8_t *mb_type_override;
+    void (*mb_type_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB forced intra prediction mode.
+     * Mirrors x264_image_properties_t.intra_mode_override. */
+    int8_t *intra_mode_override;
+    void (*intra_mode_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB motion vector difference injection. */
+    int16_t *mvd_x_override;
+    int16_t *mvd_y_override;
+    uint8_t *mvd_active_override;
+    void (*mvd_x_override_free)( void* );
+    void (*mvd_y_override_free)( void* );
+    void (*mvd_active_override_free)( void* );
+
+    /* LaMoshPit-Edge extension: per-MB DCT coefficient scaling override. */
+    uint8_t *dct_scale_override;
+    void (*dct_scale_override_free)( void* );
+
 #if HAVE_OPENCL
     x264_frame_opencl_t opencl;
 #endif
