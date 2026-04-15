@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QJsonObject>
 
 #include "core/model/MBEditData.h"
 #include "core/model/GlobalEncodeParams.h"
@@ -55,6 +56,15 @@ public:
 
     // Sanitize a user-supplied name so it can be used as a filename.
     static QString sanitize(const QString& name);
+
+    // ── Public JSON (de)serialization helpers ─────────────────────────────────
+    // Exposed so other subsystems (e.g. FrameTransformer writing a per-render
+    // sidecar .json next to the versioned MP4 output) can round-trip knob
+    // state without reaching into PresetManager.cpp's static internals.
+    static QJsonObject      mbToJson(const FrameMBParams& p);
+    static FrameMBParams    jsonToMB(const QJsonObject& o);
+    static QJsonObject      gpToJson(const GlobalEncodeParams& p);
+    static GlobalEncodeParams jsonToGP(const QJsonObject& o);
 
 private:
     static QString presetDir(Type t);

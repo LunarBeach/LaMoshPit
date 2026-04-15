@@ -177,13 +177,16 @@ void ControlLogger::logFrameEditApplied(int frameIdx, const FrameMBParams& p,
     // Bitstream-surgery knobs — critical for validating the runBitstreamEdit()
     // render path.  bsDctScale default is 100 (unchanged); bsIntraMode/bsMbType
     // default −1 (off); all others default 0.
-    chk("bsMvdX",       p.bsMvdX);
-    chk("bsMvdY",       p.bsMvdY);
-    chk("bsForceSkip",  p.bsForceSkip);
-    chk("bsIntraMode",  p.bsIntraMode,  -1);
+    chk("bsMvdX",             p.bsMvdX);
+    chk("bsMvdY",             p.bsMvdY);
+    chk("bsSuppressResOnMvd", p.bsSuppressResOnMvd, 1);
+    chk("bsForceSkip",        p.bsForceSkip);
+    chk("bsIntraMode",        p.bsIntraMode,  -1);
     /* bsMbType not logged — feature migrated to Partition Mode (encoder-wide). */
-    chk("bsDctScale",   p.bsDctScale,   100);
-    chk("bsCbpZero",    p.bsCbpZero);
+    chk("bsDctScale",         p.bsDctScale,   100);
+    chk("bsCbpZero",          p.bsCbpZero);
+    chk("bsCbpZeroLuma",      p.bsCbpZeroLuma,    -1);
+    chk("bsCbpZeroChroma",    p.bsCbpZeroChroma,  -1);
 
     write(QString("         \\_ end frame %1").arg(frameIdx));
 }

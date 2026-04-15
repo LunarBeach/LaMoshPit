@@ -1,4 +1,5 @@
 #include "DecodePipeline.h"
+#include "core/util/HwEncoder.h"
 #include <QDebug>
 #include <cmath>
 
@@ -9,15 +10,20 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/rational.h>
 #include <libavutil/display.h>
+#include <libswscale/swscale.h>
 }
 
 bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& outputFile,
-                                      ProgressCallback progress)
+                                      ProgressCallback progress,
+                                      bool useHwEncode)
 {
     AVFormatContext *ifmt_ctx = nullptr, *ofmt_ctx = nullptr;
     AVCodecContext *dec_ctx = nullptr, *enc_ctx = nullptr;
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
+    SwsContext *sws_to_nv12 = nullptr;   // active only for HW-encode path
+    AVFrame *nv12_frame = nullptr;       // reused per-frame scratch buffer
+    bool usingHw = false;
     int video_stream_idx = -1;
     bool success = false;
 
@@ -136,8 +142,26 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, outputFile.toUtf8().constData());
         if (!ofmt_ctx) goto cleanup;
 
-        // 4. Setup H.264 Encoder - SIMPLIFIED
-        const AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+        // 4. Setup H.264 Encoder — optional HW path with libx264 fallback.
+        //
+        // When useHwEncode is set, try vendor-specific HW encoders first
+        // (nvenc / amf / qsv / h264_mf).  HW encoders can fail at either
+        // avcodec_find_encoder_by_name (not compiled in) or avcodec_open2
+        // (no compatible GPU / drivers).  Either failure silently falls
+        // back to libx264 so imports always succeed.
+        const AVCodec *encoder = nullptr;
+        if (useHwEncode) {
+            QString hwName;
+            encoder = hwenc::findBestH264Encoder(&hwName);
+            if (encoder) {
+                qInfo() << "[DecodePipeline] Trying HW encoder:" << hwName;
+                usingHw = true;
+            }
+        }
+        if (!encoder) {
+            encoder = avcodec_find_encoder(AV_CODEC_ID_H264);   // libx264
+            usingHw = false;
+        }
         enc_ctx = avcodec_alloc_context3(encoder);
 
         // Copy basic properties; swap width/height for 90°/270° rotated sources.
@@ -150,7 +174,8 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
             enc_ctx->width  = dec_ctx->width;
         }
         enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
-        enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        // HW encoders accept NV12 universally; libx264 wants YUV420P.
+        enc_ctx->pix_fmt = usingHw ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
         
         // SET FRAMERATE AND TIMEBASE CORRECTLY - KEY FIX
         enc_ctx->framerate = in_stream->avg_frame_rate;
@@ -174,20 +199,82 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         enc_ctx->gop_size    = 9999;
         enc_ctx->max_b_frames = 3;
 
-        // x264-params: keyint=9999 prevents automatic IDR insertions,
-        // scenecut=0 disables scene-cut IDR detection,
-        // bframes=3 + b-adapt=2 for rich B-frame prediction structure,
-        // min-keyint=1 still allows user-forced I-frames anywhere.
-        av_opt_set(enc_ctx->priv_data, "x264-params",
-                   "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
-                   0);
+        // x264-specific params — only meaningful on the libx264 path.
+        // HW encoders ignore priv_data "x264-params" and have their own
+        // defaults that are fine for import standardisation.
+        if (!usingHw) {
+            av_opt_set(enc_ctx->priv_data, "x264-params",
+                       "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
+                       0);
+        }
 
         if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
             enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
         if (avcodec_open2(enc_ctx, encoder, nullptr) < 0) {
-            qDebug() << "Could not open encoder";
-            goto cleanup;
+            // HW open failed (no compatible driver / runtime) — fall back
+            // to libx264 with a fresh codec context so we don't ship
+            // broken files on systems without HW support.
+            if (usingHw) {
+                qWarning() << "[DecodePipeline] HW encoder open failed, falling back to libx264";
+                avcodec_free_context(&enc_ctx);
+                usingHw = false;
+                encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+                enc_ctx = avcodec_alloc_context3(encoder);
+                if (rotation == 90 || rotation == 270) {
+                    enc_ctx->width  = dec_ctx->height;
+                    enc_ctx->height = dec_ctx->width;
+                } else {
+                    enc_ctx->width  = dec_ctx->width;
+                    enc_ctx->height = dec_ctx->height;
+                }
+                enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
+                enc_ctx->pix_fmt     = AV_PIX_FMT_YUV420P;
+                enc_ctx->framerate   = in_stream->avg_frame_rate;
+                enc_ctx->time_base   = in_stream->time_base;
+                if (enc_ctx->framerate.num <= 0 || enc_ctx->framerate.den <= 0) {
+                    enc_ctx->framerate = AVRational{24, 1};
+                    enc_ctx->time_base = AVRational{1, 24};
+                }
+                enc_ctx->bit_rate    = 6000000;
+                enc_ctx->gop_size    = 9999;
+                enc_ctx->max_b_frames = 3;
+                av_opt_set(enc_ctx->priv_data, "x264-params",
+                           "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
+                           0);
+                if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+                    enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+                if (avcodec_open2(enc_ctx, encoder, nullptr) < 0) {
+                    qDebug() << "Could not open libx264 fallback";
+                    goto cleanup;
+                }
+            } else {
+                qDebug() << "Could not open encoder";
+                goto cleanup;
+            }
+        }
+
+        // If HW encode survived open(), prepare the YUV420P → NV12 sws
+        // context + a reusable target frame.  Size matches enc_ctx (post-
+        // -rotation) since the rotation path already produces YUV420P at
+        // the encoder's dimensions.
+        if (usingHw) {
+            sws_to_nv12 = sws_getContext(
+                enc_ctx->width, enc_ctx->height, AV_PIX_FMT_YUV420P,
+                enc_ctx->width, enc_ctx->height, AV_PIX_FMT_NV12,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!sws_to_nv12) {
+                qDebug() << "Could not allocate NV12 converter";
+                goto cleanup;
+            }
+            nv12_frame = av_frame_alloc();
+            nv12_frame->format = AV_PIX_FMT_NV12;
+            nv12_frame->width  = enc_ctx->width;
+            nv12_frame->height = enc_ctx->height;
+            if (av_frame_get_buffer(nv12_frame, 32) < 0) {
+                qDebug() << "Could not allocate NV12 frame buffer";
+                goto cleanup;
+            }
         }
 
         // 5. Create Output Stream
@@ -265,8 +352,22 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                             sendFrame = rotated;
                         }
 
+                        // For HW encode, convert the YUV420P sendFrame to
+                        // NV12 before handing to the encoder.
+                        AVFrame* encodeInput = sendFrame;
+                        if (usingHw && sws_to_nv12 && nv12_frame) {
+                            av_frame_make_writable(nv12_frame);
+                            sws_scale(sws_to_nv12,
+                                      sendFrame->data, sendFrame->linesize,
+                                      0, sendFrame->height,
+                                      nv12_frame->data, nv12_frame->linesize);
+                            av_frame_copy_props(nv12_frame, sendFrame);
+                            nv12_frame->pts = sendFrame->pts;
+                            encodeInput = nv12_frame;
+                        }
+
                         // Send frame to encoder with preserved timing
-                        if (avcodec_send_frame(enc_ctx, sendFrame) == 0) {
+                        if (avcodec_send_frame(enc_ctx, encodeInput) == 0) {
                             AVPacket *enc_pkt = av_packet_alloc();
                             // Receive encoded packets
                             while (avcodec_receive_packet(enc_ctx, enc_pkt) == 0) {
@@ -305,6 +406,8 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
 cleanup:
     av_packet_free(&pkt);
     av_frame_free(&frame);
+    if (nv12_frame)  av_frame_free(&nv12_frame);
+    if (sws_to_nv12) sws_freeContext(sws_to_nv12);
     if (dec_ctx) avcodec_free_context(&dec_ctx);
     if (enc_ctx) avcodec_free_context(&enc_ctx);
     if (ofmt_ctx && !(ofmt_ctx->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt_ctx->pb);

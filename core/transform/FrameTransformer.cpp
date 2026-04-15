@@ -1,11 +1,20 @@
 #include "FrameTransformer.h"
 
 #include "core/logger/ControlLogger.h"
+#include "core/presets/PresetManager.h"
+#include "core/presets/VersionPathUtil.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QDebug>
 #include <QSet>
 #include <QByteArray>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDateTime>
+#include <cstdarg>   // va_list for x264 log callback
+#include <cstdio>    // vsnprintf
 #include <cstdlib>   // std::rand(), malloc/free
 #include <cstring>   // memcpy, memset
 #include <cmath>     // sin, cos, round
@@ -50,8 +59,10 @@ static bool anyBitstreamEdits(const MBEditMap& edits)
 {
     for (auto it = edits.constBegin(); it != edits.constEnd(); ++it) {
         const FrameMBParams& p = it.value();
-        if (p.bsCbpZero    > 0)   return true;
-        if (p.bsForceSkip  > 0)   return true;
+        if (p.bsCbpZero       > 0)   return true;
+        if (p.bsCbpZeroLuma   > 0)   return true;
+        if (p.bsCbpZeroChroma > 0)   return true;
+        if (p.bsForceSkip     > 0)   return true;
         // bsMbType no longer gates the bitstream path — control moved to the
         // global --partitions parameter (GlobalEncodeParams::partitionMode)
         // which is applied to both render paths at encoder-setup time, not
@@ -62,6 +73,82 @@ static bool anyBitstreamEdits(const MBEditMap& edits)
         if (p.bsDctScale != 100)  return true;
     }
     return false;
+}
+
+// ── x264 → ControlLogger bridge ───────────────────────────────────────────────
+// Installed as x264Param.pf_log so every libx264 log line (INFO + DEBUG levels)
+// funnels into the same LaMoshPit debug log file that the UI toggle writes to.
+// Only forwards when ControlLogger is enabled; otherwise returns immediately so
+// release-build renders aren't polluted with x264's chatter.  The fork's
+// MVD-hook instrumentation (MVDHOOK, MVDGUARD, MVDPOSTRD, MVDCOMMIT, MVDMISS)
+// is emitted at X264_LOG_DEBUG — so i_log_level must be set to X264_LOG_DEBUG
+// on the param struct for those lines to reach us.
+static void x264LogToControlLogger(void* /*priv*/, int i_level, const char* psz,
+                                   va_list args)
+{
+    if (!ControlLogger::instance().isEnabled()) return;
+
+    char buf[1024];
+    int n = vsnprintf(buf, sizeof(buf), psz, args);
+    if (n <= 0) return;
+    // x264 appends its own newline — strip to keep ControlLogger's one-line-
+    // per-entry format tidy.
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        buf[--n] = 0;
+
+    const char* lvlTag = "info";
+    switch (i_level) {
+    case 0: lvlTag = "error";   break;  // X264_LOG_ERROR
+    case 1: lvlTag = "warn";    break;  // X264_LOG_WARNING
+    case 2: lvlTag = "info";    break;  // X264_LOG_INFO
+    case 3: lvlTag = "debug";   break;  // X264_LOG_DEBUG
+    }
+    ControlLogger::instance().logNote(
+        QString("x264[%1] %2").arg(lvlTag, QString::fromUtf8(buf, n)));
+}
+
+// ── Commit helper: rename temp file to next versioned output + write sidecar ─
+// Called from the end of each render path after the temp file has been fully
+// written and closed.  Does two things atomically-enough for an interactive
+// tool: (1) rename tempPath to the next .vNN.mp4 slot in the source's family,
+// (2) write a sidecar .json capturing the knob state that produced it.  If
+// the rename fails the temp file is cleaned up; if the sidecar write fails
+// that's logged but doesn't fail the render — the video is what matters.
+QString FrameTransformerWorker::commitVersionedOutput(const QString& tempPath,
+                                                     QString& errorMsg)
+{
+    const QString outputPath = VersionPathUtil::nextVersionPath(m_videoPath);
+
+    if (!QFile::rename(tempPath, outputPath)) {
+        errorMsg = QString("Cannot rename %1 -> %2").arg(tempPath, outputPath);
+        QFile::remove(tempPath);
+        return QString();
+    }
+
+    // Write sidecar JSON next to the video.  Best effort — if the disk is
+    // full or permissions are wrong, the video still exists and the bin will
+    // show it; only the replay-from-sidecar UX degrades.
+    QJsonObject root;
+    root["sourceVideo"] = QFileInfo(m_videoPath).fileName();
+    root["outputVideo"] = QFileInfo(outputPath).fileName();
+    root["version"]     = VersionPathUtil::versionOf(outputPath);
+    root["created"]     = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    root["globalParams"] = PresetManager::gpToJson(m_globalParams);
+
+    QJsonArray frameEdits;
+    for (auto it = m_mbEdits.constBegin(); it != m_mbEdits.constEnd(); ++it) {
+        QJsonObject fo;
+        fo["frameIdx"] = it.key();
+        fo["params"]   = PresetManager::mbToJson(it.value());
+        frameEdits.append(fo);
+    }
+    root["frameEdits"] = frameEdits;
+
+    QFile sf(VersionPathUtil::sidecarJsonPath(outputPath));
+    if (sf.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        sf.write(QJsonDocument(root).toJson());
+
+    return outputPath;
 }
 
 // ── Helper: map analysis type char → AVPictureType ───────────────────────────
@@ -1190,21 +1277,20 @@ splice_cleanup:
     if (ofmt) avformat_free_context(ofmt);
     if (ifmt) avformat_close_input(&ifmt);
 
+    // Non-destructive commit: write to the next versioned sibling of
+    // m_videoPath rather than overwriting the source.  See VersionPathUtil +
+    // commitVersionedOutput for the exact scheme.  Undo is now "load the
+    // previous version from the bin" rather than restoring a shadow file.
+    QString outputPath;
     if (ok) {
-        if (!QFile::remove(m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot remove original file for replacement";
-            QFile::remove(tempPath);
-        } else if (!QFile::rename(tempPath, m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot rename temp file to original path";
-        }
+        outputPath = commitVersionedOutput(tempPath, errorMsg);
+        if (outputPath.isEmpty()) ok = false;
     } else {
         QFile::remove(tempPath);
     }
 
     ControlLogger::instance().logApplyCompleted(ok);
-    emit done(ok, errorMsg);
+    emit done(ok, errorMsg, outputPath);
 }
 
 // =============================================================================
@@ -1319,6 +1405,15 @@ void FrameTransformerWorker::runBitstreamEdit()
         if (x264_param_default_preset(&x264Param, "medium", nullptr) < 0) {
             errorMsg = "x264_param_default_preset failed"; goto cleanup;
         }
+
+        // Pipe libx264's log output (including the MVD-hook diagnostics our
+        // fork emits at DEBUG level) into ControlLogger.  When control debug
+        // logging is toggled off in the UI, the callback is a no-op — so the
+        // DEBUG level setting here is always safe.
+        x264Param.pf_log         = &x264LogToControlLogger;
+        x264Param.p_log_private  = nullptr;
+        x264Param.i_log_level    = 3;   // X264_LOG_DEBUG
+
         x264Param.i_width       = width;
         x264Param.i_height      = height;
         x264Param.i_csp         = X264_CSP_I420;
@@ -1541,7 +1636,15 @@ void FrameTransformerWorker::runBitstreamEdit()
                 // Propagate bs* seed values at decayed intensity (probability-like
                 // knobs scale by f; direct-value knobs pass through unchanged on
                 // the cascade seed frame, off on downstream cascade frames).
-                c.bsCbpZero    = (int)(src.bsCbpZero   * f);
+                // For sub-knobs with a −1 "inherit" sentinel, preserve −1 so the
+                // decayed parent still flows through at the inherit path; only
+                // scale explicit non-negative values.
+                c.bsCbpZero       = (int)(src.bsCbpZero   * f);
+                c.bsCbpZeroLuma   = (src.bsCbpZeroLuma   < 0)
+                                    ? -1 : (int)(src.bsCbpZeroLuma   * f);
+                c.bsCbpZeroChroma = (src.bsCbpZeroChroma < 0)
+                                    ? -1 : (int)(src.bsCbpZeroChroma * f);
+                c.bsSuppressResOnMvd = src.bsSuppressResOnMvd;
                 c.bsForceSkip  = (int)(src.bsForceSkip * f);
                 activeEdits[ci] = c;
             }
@@ -1635,14 +1738,46 @@ void FrameTransformerWorker::runBitstreamEdit()
                 ? expandedMBs(*base, p->spillRadius, mbCols, mbRows)
                 : *base;
 
-            // CBP Zero — probability-per-MB (0..100).
-            if (p->bsCbpZero > 0) {
-                uint8_t* arr = (uint8_t*)std::calloc(mbCount, 1);
-                for (int mbi : mbs)
-                    if (mbi >= 0 && mbi < mbCount &&
-                        (std::rand() % 100) < p->bsCbpZero) arr[mbi] = 1;
-                picIn.prop.cbp_override      = arr;
-                picIn.prop.cbp_override_free = std::free;
+            // CBP Zero (bitmask: bit0=luma, bit1=chroma) + MVD auto-suppression.
+            //
+            // Three inputs combine:
+            //   bsCbpZero (parent, 0..100)       probability both-axes zero
+            //   bsCbpZeroLuma   (-1 = inherit)   explicit luma-only rate
+            //   bsCbpZeroChroma (-1 = inherit)   explicit chroma-only rate
+            //   bsSuppressResOnMvd (0/1)         when MVD is active, hard-force
+            //                                    0x3 on flagged MBs so the
+            //                                    forced MV is actually visible
+            //                                    (residual would otherwise
+            //                                    compensate the wrong MV and
+            //                                    the output would match input).
+            //
+            // Effective rate resolution: sub-knob >= 0 wins over parent; sub-knob
+            // == -1 inherits parent.  Luma/Chroma dice are rolled independently
+            // so intermediate values produce mixed per-MB outcomes.  When auto-
+            // suppress fires, its 0x3 OR's on top of whatever the dice picked.
+            {
+                const int lumaRate   = (p->bsCbpZeroLuma   >= 0)
+                                       ? p->bsCbpZeroLuma   : p->bsCbpZero;
+                const int chromaRate = (p->bsCbpZeroChroma >= 0)
+                                       ? p->bsCbpZeroChroma : p->bsCbpZero;
+                const bool mvdActive    = (p->bsMvdX != 0 || p->bsMvdY != 0);
+                const bool autoSuppress = mvdActive && (p->bsSuppressResOnMvd != 0);
+
+                if (lumaRate > 0 || chromaRate > 0 || autoSuppress) {
+                    uint8_t* arr = (uint8_t*)std::calloc(mbCount, 1);
+                    for (int mbi : mbs) {
+                        if (mbi < 0 || mbi >= mbCount) continue;
+                        uint8_t v = 0;
+                        if (lumaRate   > 0 && (std::rand() % 100) < lumaRate)
+                            v |= 0x1;
+                        if (chromaRate > 0 && (std::rand() % 100) < chromaRate)
+                            v |= 0x2;
+                        if (autoSuppress) v |= 0x3;
+                        arr[mbi] = v;
+                    }
+                    picIn.prop.cbp_override      = arr;
+                    picIn.prop.cbp_override_free = std::free;
+                }
             }
             // Force Skip — probability-per-MB (0..100).
             if (p->bsForceSkip > 0) {
@@ -1765,21 +1900,20 @@ cleanup:
     if (ofmt)    avformat_free_context(ofmt);
     if (ifmt)    avformat_close_input(&ifmt);
 
+    // Non-destructive commit: write to the next versioned sibling of
+    // m_videoPath rather than overwriting the source.  See VersionPathUtil +
+    // commitVersionedOutput for the exact scheme.  Undo is now "load the
+    // previous version from the bin" rather than restoring a shadow file.
+    QString outputPath;
     if (ok) {
-        if (!QFile::remove(m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot remove original file for replacement";
-            QFile::remove(tempPath);
-        } else if (!QFile::rename(tempPath, m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot rename temp file to original path";
-        }
+        outputPath = commitVersionedOutput(tempPath, errorMsg);
+        if (outputPath.isEmpty()) ok = false;
     } else {
         QFile::remove(tempPath);
     }
 
     ControlLogger::instance().logApplyCompleted(ok);
-    emit done(ok, errorMsg);
+    emit done(ok, errorMsg, outputPath);
 }
 
 
@@ -1795,7 +1929,7 @@ void FrameTransformerWorker::runReorderFrames()
         "REORDER PATH (full decode → re-encode with new frame order)");
 
     if (m_frameIndices.size() < 2) {
-        emit done(false, "ReorderFrames: frameIndices must be [source, insertBefore]");
+        emit done(false, "ReorderFrames: frameIndices must be [source, insertBefore]", QString());
         return;
     }
     const int srcIdx    = m_frameIndices[0];
@@ -1803,8 +1937,11 @@ void FrameTransformerWorker::runReorderFrames()
 
     // No-op: dropping at the same position or immediately after is a no-op.
     if (insertBef == srcIdx || insertBef == srcIdx + 1) {
+        // No-op reorder (source = destination): no render happened, so no
+        // new versioned file to emit. Pass empty outputPath so MainWindow
+        // keeps m_currentVideoPath unchanged.
         ControlLogger::instance().logApplyCompleted(true);
-        emit done(true, "");
+        emit done(true, "", QString());
         return;
     }
 
@@ -1999,21 +2136,20 @@ reorder_cleanup:
     if (ofmt)   avformat_free_context(ofmt);
     if (ifmt)   avformat_close_input(&ifmt);
 
+    // Non-destructive commit: write to the next versioned sibling of
+    // m_videoPath rather than overwriting the source.  See VersionPathUtil +
+    // commitVersionedOutput for the exact scheme.  Undo is now "load the
+    // previous version from the bin" rather than restoring a shadow file.
+    QString outputPath;
     if (ok) {
-        if (!QFile::remove(m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot remove original file for replacement";
-            QFile::remove(tempPath);
-        } else if (!QFile::rename(tempPath, m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot rename temp file to original path";
-        }
+        outputPath = commitVersionedOutput(tempPath, errorMsg);
+        if (outputPath.isEmpty()) ok = false;
     } else {
         QFile::remove(tempPath);
     }
 
     ControlLogger::instance().logApplyCompleted(ok);
-    emit done(ok, errorMsg);
+    emit done(ok, errorMsg, outputPath);
 }
 
 // ── Main re-encode work ────────────────────────────────────────────────────
@@ -2615,20 +2751,16 @@ cleanup:
     if (ofmt)   avformat_free_context(ofmt);
     if (ifmt)   avformat_close_input(&ifmt);
 
+    // Non-destructive commit: write to the next versioned sibling of
+    // m_videoPath rather than overwriting the source.
+    QString outputPath;
     if (ok) {
-        // Atomic replace: remove original, rename temp
-        if (!QFile::remove(m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot remove original file for replacement";
-            QFile::remove(tempPath);
-        } else if (!QFile::rename(tempPath, m_videoPath)) {
-            ok = false;
-            errorMsg = "Cannot rename temp file to original path";
-        }
+        outputPath = commitVersionedOutput(tempPath, errorMsg);
+        if (outputPath.isEmpty()) ok = false;
     } else {
         QFile::remove(tempPath);
     }
 
     ControlLogger::instance().logApplyCompleted(ok);
-    emit done(ok, errorMsg);
+    emit done(ok, errorMsg, outputPath);
 }

@@ -59,7 +59,13 @@ public slots:
 signals:
     void progress(int current, int total);
     void warning(QString message);
-    void done(bool success, QString errorMessage);
+    // outputPath: on success, the actual file the render was written to (new
+    // .vNN versioned sibling of the original input, per VersionPathUtil).  On
+    // failure or for degenerate operations that didn't produce output, empty.
+    // MainWindow uses this to swap the active video to the fresh iteration
+    // without touching the source, giving the user a growing history to browse
+    // in the Media Bin.
+    void done(bool success, QString errorMessage, QString outputPath);
 
 private:
     // Bitstream splice for DeleteFrames: copies compressed packets without
@@ -80,6 +86,13 @@ private:
     // (bsCbpZero, bsForceSkip, bsMbType, bsIntraMode, bsMvdX|Y, bsDctScale).
     // Returns via the same done(bool, QString) signal as the pixel path.
     void runBitstreamEdit();
+
+    // Commit a successfully-written tempPath as the next versioned sibling
+    // of m_videoPath (via VersionPathUtil) and write a sidecar JSON capturing
+    // m_mbEdits + m_globalParams.  On success returns the final output path
+    // (absolute); on failure returns empty and populates errorMsg.  Never
+    // touches m_videoPath on disk — the source stays intact.
+    QString commitVersionedOutput(const QString& tempPath, QString& errorMsg);
 
     QString            m_videoPath;
     QVector<int>       m_frameIndices;

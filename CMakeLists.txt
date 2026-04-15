@@ -83,6 +83,36 @@ else()
 endif()
 # Add h264bitstream as subdirectory
 add_subdirectory(h264bitstream)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Spout2 minimal embed — compile only the SpoutDX + dependent SpoutGL helpers
+# we need, as a static library.  We don't use Spout2's top-level CMakeLists
+# because it pulls in OpenGL targets, examples, installers, and tests that
+# aren't relevant to LaMoshPit's bundle.
+#
+# Output: a single static library `spout2_embed` that LaMoshPit links against.
+# ──────────────────────────────────────────────────────────────────────────────
+set(SPOUT2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/Spout2/SPOUTSDK")
+add_library(spout2_embed STATIC
+    "${SPOUT2_ROOT}/SpoutDirectX/SpoutDX/SpoutDX.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutCopy.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutDirectX.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutFrameCount.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutSenderNames.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutSharedMemory.cpp"
+    "${SPOUT2_ROOT}/SpoutGL/SpoutUtils.cpp"
+)
+target_include_directories(spout2_embed PUBLIC
+    "${SPOUT2_ROOT}/SpoutDirectX/SpoutDX"
+    "${SPOUT2_ROOT}/SpoutGL"
+)
+target_link_libraries(spout2_embed PUBLIC
+    d3d11 dxgi shlwapi psapi
+)
+# Silence warnings from 3rd-party source so they don't drown the build log.
+if(MSVC)
+    target_compile_options(spout2_embed PRIVATE /W0)
+endif()
 #Link Directories
 link_directories(${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib)
 
@@ -92,6 +122,7 @@ add_executable(LeeAnnesMoshPit WIN32
     main.cpp
     resources.qrc
     gui/MainWindow.cpp
+    gui/SettingsDialog.cpp
     gui/BitstreamAnalyzer.cpp
     gui/widgets/TimelineWidget.cpp
     gui/widgets/PreviewPlayer.cpp
@@ -101,10 +132,34 @@ add_executable(LeeAnnesMoshPit WIN32
     gui/widgets/BitstreamTestWidget.cpp
     gui/widgets/QuickMoshWidget.cpp
     gui/widgets/ToggleSwitch.cpp
+    gui/widgets/MediaBinWidget.cpp
+    gui/sequencer/SequencerPreviewPlayer.cpp
+    gui/sequencer/SequencerDock.cpp
+    gui/sequencer/SequencerClipItem.cpp
+    gui/sequencer/SequencerRulerItem.cpp
+    gui/sequencer/SequencerPlayheadItem.cpp
+    gui/sequencer/SequencerTimelineView.cpp
+    gui/sequencer/SequencerTrackHeader.cpp
+    gui/sequencer/SequencerTransitionPanel.cpp
+    gui/sequencer/SequencerRenderDialog.cpp
     core/pipeline/DecodePipeline.cpp
     core/transform/FrameTransformer.cpp
     core/logger/ControlLogger.cpp
     core/presets/PresetManager.cpp
+    core/presets/VersionPathUtil.cpp
+    core/project/Project.cpp
+    core/sequencer/SequencerProject.cpp
+    core/sequencer/EditCommand.cpp
+    core/sequencer/HwDecode.cpp
+    core/sequencer/SequencerClipDecoder.cpp
+    core/sequencer/SequencerPlaybackClock.cpp
+    core/sequencer/TrackPlaybackChain.cpp
+    core/sequencer/Transition.cpp
+    core/sequencer/FrameRouter.cpp
+    core/sequencer/SpoutSender.cpp
+    core/sequencer/SequencerRenderer.cpp
+    core/util/HwEncoder.cpp
+    core/thumbnail/ThumbnailGenerator.cpp
 )
 
 #Link everything together
@@ -116,6 +171,7 @@ target_link_libraries(LeeAnnesMoshPit PRIVATE
     Qt6::MultimediaWidgets
     Qt6::Concurrent
     h264bitstream
+    spout2_embed
     # Uses the official targets provided by vcpkg (dangling :: targets stripped above)
     ${FFMPEG_LIBRARIES_CLEAN}
     # Core FFMPEG libs — linked explicitly so they are always present regardless of

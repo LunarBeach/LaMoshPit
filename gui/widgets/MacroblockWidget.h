@@ -183,7 +183,10 @@ private:
     // m_dialBsMbType / m_sbBsMbType removed — control migrated to Global
     // Encode Params → Partition Mode for stability and correctness.
     QDial* m_dialBsDctScale;   QSpinBox* m_sbBsDctScale;
-    QDial* m_dialBsCbpZero;    QSpinBox* m_sbBsCbpZero;
+    QDial* m_dialBsCbpZero;       QSpinBox* m_sbBsCbpZero;        // parent (0..100)
+    QDial* m_dialBsCbpZeroLuma;   QSpinBox* m_sbBsCbpZeroLuma;    // -1..100
+    QDial* m_dialBsCbpZeroChroma; QSpinBox* m_sbBsCbpZeroChroma;  // -1..100
+    QDial* m_dialBsSuppressResOnMvd; QSpinBox* m_sbBsSuppressResOnMvd; // 0/1
 
     // All knob widgets — for bulk enable/disable and signal blocking
     QList<QDial*>    m_allDials;

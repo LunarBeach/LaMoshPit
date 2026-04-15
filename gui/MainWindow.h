@@ -2,10 +2,13 @@
 
 #include <QMainWindow>
 #include <QVector>
+#include <memory>
 #include "core/model/VideoSequence.h"
 #include "gui/BitstreamAnalyzer.h"
 #include "core/transform/FrameTransformer.h"
 #include "core/model/GlobalEncodeParams.h"
+
+class Project;
 
 class TimelineWidget;
 class PreviewPlayer;
@@ -14,6 +17,15 @@ class GlobalParamsWidget;
 class PropertyPanel;
 class BitstreamTestWidget;
 class QuickMoshWidget;
+class MediaBinWidget;
+// The NLE render slot's signature references SequencerRenderer::Params, so
+// the full header is pulled in here rather than forward-declared.
+#include "core/sequencer/SequencerRenderer.h"
+
+namespace sequencer {
+    class SequencerProject;
+    class SequencerDock;
+}
 class QPushButton;
 class QProgressBar;
 class QLabel;
@@ -45,14 +57,33 @@ private slots:
     void onInterpRight();
     void onFlip();
     void onFlop();
-    void onUndo();
+    // Ctrl+Z handler.  Loads the nearest older version of the current video
+    // from its family's .vNN siblings.  See VersionPathUtil::previousVersionPath.
+    void onLoadPreviousVersion();
+    // MediaBinWidget emits videoSelected(path); MainWindow loads that video.
+    void onMediaBinVideoSelected(const QString& videoPath);
+
+    // Project lifecycle — File menu actions.
+    void onNewProject();
+    void onOpenProject();
+    void onSaveProject();
 
     // Timeline drag-reorder
     void onFrameReorderRequested(int sourceIdx, int insertBeforeIdx);
 
+    // NLE Sequencer render dialog → background render worker.  The dock
+    // emits renderRequested with the user's choices; we own the thread,
+    // progress UI, and post-render import-back.  See SequencerDock.h.
+    void onNleRenderRequested(const sequencer::SequencerRenderer::Params& params,
+                              bool importIntoProject);
+
     // Worker callbacks
     void onTransformProgress(int current, int total);
-    void onTransformDone(bool success, QString errorMessage);
+    // outputPath: the actual .vNN.mp4 file the render was written to (new
+    // versioned sibling).  Empty if no render produced output (failure, no-op
+    // reorder, etc.).  MainWindow swaps m_currentVideoPath to this path so
+    // the user sees the fresh iteration; the source stays on disk for the bin.
+    void onTransformDone(bool success, QString errorMessage, QString outputPath);
 
     // Timeline ↔ MB editor sync
     void onMBFrameNavigated(int frameIdx);
@@ -79,6 +110,18 @@ private:
     void reloadVideoAndTimeline();
     bool eventFilter(QObject* obj, QEvent* e) override;
 
+    // Switch the active project.  Tears down current video state, re-points
+    // the bin and import path at the new project's folders, and (if the
+    // project has an activeVideo set) loads that video automatically.
+    // Takes ownership of the passed-in Project.  Called from onNewProject,
+    // onOpenProject, and the startup auto-resume path.
+    void setActiveProject(std::unique_ptr<Project> p);
+
+    // Resolve the default projects root: Documents/LaMoshPit Projects/.
+    // Creates the directory on first call.  Used as the parent for new
+    // project folders when the user picks "New Project".
+    QString defaultProjectsRoot();
+
     // ── Layout widgets ────────────────────────────────────────────────────
     TimelineWidget*      m_timeline    { nullptr };
     PreviewPlayer*       m_preview     { nullptr };
@@ -87,6 +130,12 @@ private:
     PropertyPanel*       m_propertyPanel{ nullptr };
     BitstreamTestWidget* m_bitstreamTest{ nullptr };
     QuickMoshWidget*     m_quickMosh   { nullptr };
+    MediaBinWidget*      m_mediaBin    { nullptr };
+
+    // NLE Sequencer — distinct from the single-clip TimelineWidget in the
+    // mosh editor.  Dockable preview + (future) multi-track timeline.
+    sequencer::SequencerProject* m_seqProject { nullptr };   // owned by MainWindow
+    sequencer::SequencerDock*    m_seqDock    { nullptr };
 
     // Outer splitters (kept for size restore on panel show)
     QSplitter* m_topSplitter   { nullptr };
@@ -104,7 +153,8 @@ private:
     QPushButton*  m_btnInterpRight{ nullptr };
     QPushButton*  m_btnFlip       { nullptr };
     QPushButton*  m_btnFlop       { nullptr };
-    QPushButton*  m_btnUndo      { nullptr };
+    // m_btnUndo removed — undo is now Ctrl+Z → load previous version from the
+    // Media Bin's accumulated iterations.  See onLoadPreviousVersion.
     QProgressBar* m_progressBar{ nullptr };
     QLabel*       m_selectionLabel{ nullptr };
 
@@ -123,9 +173,16 @@ private:
     QString        m_currentVideoPath;
     AnalysisReport m_lastAnalysis;
 
-    // Undo: a single backup copy of the imported file
-    QString m_undoBackupPath;
-    bool    m_hasUndo       { false };
+    // Active project.  Exactly one at a time; always non-null after the
+    // constructor runs (we auto-create an Untitled project if none is
+    // resumable from QSettings).  Owned by MainWindow; lifecycle is scoped
+    // to the instance since MainWindow is the only window.
+    std::unique_ptr<Project> m_project;
+
+    // m_undoBackupPath / m_hasUndo removed — non-destructive renders mean
+    // every iteration is preserved on disk as a new .vNN.mp4 sibling.  "Undo"
+    // is now "load a previous version from the bin" (Ctrl+Z or click).  See
+    // VersionPathUtil for the filename scheme + previousVersionPath().
     bool    m_transformBusy { false };
 
     // Tracks which render path was used on the most recent startTransform() —

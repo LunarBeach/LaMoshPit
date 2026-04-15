@@ -677,10 +677,18 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     }
 
     // ── BITSTREAM SURGERY — MOTION ───────────────────────────────────────────
+    //
+    // "Suppress Residual on MVD" is a 0/1 toggle (rendered as a knob for
+    // layout consistency).  Default = 1.  When on AND MVD X/Y is non-zero on a
+    // flagged MB, runBitstreamEdit auto-forces the CBP override for that MB
+    // so the decoder can't compensate the forced MV via residual.  Set to 0
+    // for "scientific" mode — the wrong MV lives in the bitstream but the
+    // decoded pixels match input.
     {
         auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 MOTION");
         s.l->addWidget(makeKnob("MVD\u2192X",  -128, 128, m_dialBsMvdX,      m_sbBsMvdX,      s.w));
         s.l->addWidget(makeKnob("MVD\u2192Y",  -128, 128, m_dialBsMvdY,      m_sbBsMvdY,      s.w));
+        s.l->addWidget(makeKnob("Suppress Res",  0,   1, m_dialBsSuppressResOnMvd, m_sbBsSuppressResOnMvd, s.w));
         s.l->addWidget(makeKnob("Force Skip",     0, 100, m_dialBsForceSkip, m_sbBsForceSkip, s.w));
         s.l->addStretch(1);
     }
@@ -700,10 +708,20 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     }
 
     // ── BITSTREAM SURGERY — RESIDUAL ─────────────────────────────────────────
+    //
+    // CBP Zero structure: "CBP Zero" is the parent rate that applies to BOTH
+    // luma and chroma unless an axis-specific knob is explicitly set.  The
+    // Luma/Chroma knobs use sentinel −1 = "inherit parent" so existing
+    // single-knob behaviour is preserved.  Setting either axis to 0..100
+    // overrides the parent for that axis only — enabling effects like
+    // luma-only suppression (brightness bleed from reference) or chroma-only
+    // suppression (color smear).
     {
         auto s = makeSection("\u2500\u2500 BITSTREAM \u2014 RESIDUAL");
-        s.l->addWidget(makeKnob("DCT Scale",   0, 200,  m_dialBsDctScale,  m_sbBsDctScale,  s.w));
-        s.l->addWidget(makeKnob("CBP Zero",    0, 100,  m_dialBsCbpZero,   m_sbBsCbpZero,   s.w));
+        s.l->addWidget(makeKnob("DCT Scale",    0, 200,  m_dialBsDctScale,       m_sbBsDctScale,       s.w));
+        s.l->addWidget(makeKnob("CBP Zero",     0, 100,  m_dialBsCbpZero,        m_sbBsCbpZero,        s.w));
+        s.l->addWidget(makeKnob("CBP\u2192Luma",   -1, 100, m_dialBsCbpZeroLuma,    m_sbBsCbpZeroLuma,    s.w));
+        s.l->addWidget(makeKnob("CBP\u2192Chroma", -1, 100, m_dialBsCbpZeroChroma,  m_sbBsCbpZeroChroma,  s.w));
         s.l->addStretch(1);
     }
 
@@ -853,7 +871,10 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
     connectKnobs(m_dialBsIntraMode,  m_sbBsIntraMode,  &FrameMBParams::bsIntraMode,  "BS Intra Mode");
     // bsMbType knob removed — replaced by Global Encode Params → Partition Mode.
     connectKnobs(m_dialBsDctScale,   m_sbBsDctScale,   &FrameMBParams::bsDctScale,   "BS DCT Scale");
-    connectKnobs(m_dialBsCbpZero,    m_sbBsCbpZero,    &FrameMBParams::bsCbpZero,    "BS CBP Zero");
+    connectKnobs(m_dialBsCbpZero,        m_sbBsCbpZero,        &FrameMBParams::bsCbpZero,          "BS CBP Zero");
+    connectKnobs(m_dialBsCbpZeroLuma,    m_sbBsCbpZeroLuma,    &FrameMBParams::bsCbpZeroLuma,      "BS CBP Zero Luma");
+    connectKnobs(m_dialBsCbpZeroChroma,  m_sbBsCbpZeroChroma,  &FrameMBParams::bsCbpZeroChroma,    "BS CBP Zero Chroma");
+    connectKnobs(m_dialBsSuppressResOnMvd, m_sbBsSuppressResOnMvd, &FrameMBParams::bsSuppressResOnMvd, "BS Suppress Residual on MVD");
 
     // ── Transient slider connections ──────────────────────────────────────────
     // Cascade controls are seed-specific envelope params — they must NOT
@@ -1303,11 +1324,14 @@ void MacroblockWidget::loadKnobsFromCurrentFrame()
     // Bitstream-domain
     setKnob(m_dialBsMvdX,       m_sbBsMvdX,       p.bsMvdX);
     setKnob(m_dialBsMvdY,       m_sbBsMvdY,       p.bsMvdY);
+    setKnob(m_dialBsSuppressResOnMvd, m_sbBsSuppressResOnMvd, p.bsSuppressResOnMvd);
     setKnob(m_dialBsForceSkip,  m_sbBsForceSkip,  p.bsForceSkip);
     setKnob(m_dialBsIntraMode,  m_sbBsIntraMode,  p.bsIntraMode);
     // bsMbType knob removed — see Partition Mode in Global Encode Params.
-    setKnob(m_dialBsDctScale,   m_sbBsDctScale,   p.bsDctScale);
-    setKnob(m_dialBsCbpZero,    m_sbBsCbpZero,    p.bsCbpZero);
+    setKnob(m_dialBsDctScale,        m_sbBsDctScale,       p.bsDctScale);
+    setKnob(m_dialBsCbpZero,         m_sbBsCbpZero,        p.bsCbpZero);
+    setKnob(m_dialBsCbpZeroLuma,     m_sbBsCbpZeroLuma,    p.bsCbpZeroLuma);
+    setKnob(m_dialBsCbpZeroChroma,   m_sbBsCbpZeroChroma,  p.bsCbpZeroChroma);
 
     for (QDial*    d : m_allDials)     d->blockSignals(false);
     for (QSpinBox* s : m_allSpinboxes) s->blockSignals(false);
@@ -1480,13 +1504,16 @@ void MacroblockWidget::applyControlParams(const FrameMBParams& p)
         ep.tempDiffAmp  = p.tempDiffAmp;
         ep.hueRotate    = p.hueRotate;
         // Bitstream-domain
-        ep.bsMvdX       = p.bsMvdX;
-        ep.bsMvdY       = p.bsMvdY;
-        ep.bsForceSkip  = p.bsForceSkip;
-        ep.bsIntraMode  = p.bsIntraMode;
+        ep.bsMvdX            = p.bsMvdX;
+        ep.bsMvdY            = p.bsMvdY;
+        ep.bsSuppressResOnMvd = p.bsSuppressResOnMvd;
+        ep.bsForceSkip       = p.bsForceSkip;
+        ep.bsIntraMode       = p.bsIntraMode;
         /* ep.bsMbType left untouched — control moved to Partition Mode. */
-        ep.bsDctScale   = p.bsDctScale;
-        ep.bsCbpZero    = p.bsCbpZero;
+        ep.bsDctScale        = p.bsDctScale;
+        ep.bsCbpZero         = p.bsCbpZero;
+        ep.bsCbpZeroLuma     = p.bsCbpZeroLuma;
+        ep.bsCbpZeroChroma   = p.bsCbpZeroChroma;
     }
 
     for (QDial*    d : m_allDials)     d->blockSignals(false);

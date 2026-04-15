@@ -161,15 +161,48 @@ struct FrameMBParams {
     //                200 = double all coefficients.  Range 0..200.
     //
     //  bsCbpZero     Zero the coded-block-pattern — drops all residual data.
-    //                0 = off, 100 = zero CBP on all selected MBs.
+    //                0 = off, 100 = zero CBP on all selected MBs.  Acts as the
+    //                "parent" control: when the Luma/Chroma sub-knobs are at
+    //                the sentinel value −1, both inherit this rate.
     //                Range 0..100 (probability percentage per MB).
+    //
+    //  bsCbpZeroLuma
+    //  bsCbpZeroChroma
+    //                Independent luma/chroma residual-suppression rates.  The
+    //                H.264 CBP field is a 6-bit mask split into 4 luma bits and
+    //                2 chroma bits; x264 stores these as separate internal
+    //                fields (i_cbp_luma, i_cbp_chroma) so they can be zeroed
+    //                independently.  Visual effects:
+    //                  zero luma only  → reference-block brightness/detail
+    //                                    bleeds through, original color corr.
+    //                                    stays ("ghost luminance").
+    //                  zero chroma only → sharp detail from current frame but
+    //                                     colors slide toward the reference
+    //                                     block ("color smear").
+    //                  zero both       → classic full datamosh.
+    //                −1 = inherit from bsCbpZero (default).  0..100 = explicit
+    //                probability override for this axis.
+    //                Range −1..100.
+    //
+    //  bsSuppressResOnMvd
+    //                When MVD X/Y is non-zero on a flagged MB, auto-force the
+    //                CBP override for that MB so the decoder can't compensate
+    //                the wrong MV with residual.  Without this, the encoder
+    //                emits residual = fenc − shifted_ref, and the decoder adds
+    //                it back → output matches input despite the forced MV
+    //                being in the bitstream.  1 = auto-couple (default, visual
+    //                effect), 0 = scientific mode (wrong MV in bits, pixels
+    //                clean).  Range 0..1.
     int  bsMvdX       = 0;   // −128 .. +128
     int  bsMvdY       = 0;   // −128 .. +128
     int  bsForceSkip  = 0;   // 0 .. 100
     int  bsIntraMode  = -1;  // −1 .. 3
     int  bsMbType     = -1;  // −1 .. 4
     int  bsDctScale   = 100; // 0 .. 200
-    int  bsCbpZero    = 0;   // 0 .. 100
+    int  bsCbpZero        = 0;   // 0 .. 100   (parent)
+    int  bsCbpZeroLuma    = -1;  // −1 = inherit parent; 0..100
+    int  bsCbpZeroChroma  = -1;  // −1 = inherit parent; 0..100
+    int  bsSuppressResOnMvd = 1; // 0/1, default on
 };
 
 // Frame display-order index → per-MB edit parameters.

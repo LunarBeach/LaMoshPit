@@ -983,22 +983,34 @@ static ALWAYS_INLINE void macroblock_encode_internal( x264_t *h, int plane_count
                 h->dct.chroma_dc[p][i] = (dctcoef)(h->dct.chroma_dc[p][i] * scale_pct / 100);
     }
 
-    /* LaMoshPit-Edge CBP override: force CBP=0 on flagged MBs.
+    /* LaMoshPit-Edge CBP override: suppress residual on flagged MBs.
      *
-     * Zeroing i_cbp_luma and i_cbp_chroma here suppresses all residual emission
-     * in the CAVLC/CABAC writers further down the pipeline — their residual
-     * block writes are gated by these fields (see encoder/cavlc.c line ~573
-     * and encoder/cabac.c line ~978).
+     * The override byte is a bitmask (ABI-compatible with earlier port-versions
+     * that set it to plain 0/1 — 0x1 still means "zero luma", and pre-port-11
+     * clients writing the byte as 1 effectively zeroed luma only; callers who
+     * want chroma zeroed too must now write 0x3):
      *
-     * This also feeds into the auto-skip logic below: if after zeroing CBP
-     * the MV happens to match the predicted skip MV AND ref_idx=0, x264 will
-     * naturally convert this MB to P_SKIP or B_SKIP — the cleanest possible
-     * "frozen prediction" datamosh effect, achieved entirely by x264's own
-     * existing code paths. */
-    if( h->fdec->cbp_override && h->fdec->cbp_override[h->mb.i_mb_xy] )
+     *   bit 0  (0x1)  → zero i_cbp_luma    (kills 4-bit luma sub-block mask)
+     *   bit 1  (0x2)  → zero i_cbp_chroma  (kills 2-bit chroma DC+AC tri-state)
+     *   0x3 = both   = classic full residual suppression
+     *
+     * H.264 encodes CBP as chroma<<4 | luma (see line ~1005 below), so these
+     * axes are genuinely independent in the bitstream.  Splitting lets the
+     * user request:
+     *   luma-only  → reference brightness/detail bleeds through, chroma
+     *                correction survives (ghost-luminance look)
+     *   chroma-only → current-frame detail stays, colors slide toward the
+     *                 reference block (color-smear look)
+     *
+     * Zeroing here also feeds the auto-skip logic below: if both luma and
+     * chroma get zeroed AND the MV matches predicted skip MV AND ref_idx=0,
+     * the MB naturally converts to P_SKIP/B_SKIP — an emergent side effect
+     * we keep on purpose. */
+    if( h->fdec->cbp_override )
     {
-        h->mb.i_cbp_luma = 0;
-        h->mb.i_cbp_chroma = 0;
+        uint8_t cbpFlags = h->fdec->cbp_override[h->mb.i_mb_xy];
+        if( cbpFlags & 0x1 ) h->mb.i_cbp_luma   = 0;
+        if( cbpFlags & 0x2 ) h->mb.i_cbp_chroma = 0;
     }
 
     /* store cbp */

@@ -6,10 +6,17 @@
 #include "widgets/PropertyPanel.h"
 #include "widgets/BitstreamTestWidget.h"
 #include "widgets/QuickMoshWidget.h"
+#include "widgets/MediaBinWidget.h"
+#include "sequencer/SequencerDock.h"
+#include "core/sequencer/SequencerProject.h"
+#include "SettingsDialog.h"
 #include "BitstreamAnalyzer.h"
 #include "core/pipeline/DecodePipeline.h"
 #include "core/transform/FrameTransformer.h"
 #include "core/presets/PresetManager.h"
+#include "core/presets/VersionPathUtil.h"
+#include "core/project/Project.h"
+#include "core/thumbnail/ThumbnailGenerator.h"
 #include "core/logger/ControlLogger.h"
 
 #include <QHBoxLayout>
@@ -29,6 +36,10 @@
 #include <QThread>
 #include <QFile>
 #include <QAction>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QDialog>
 #include <QPixmap>
 #include <QPainter>
@@ -70,8 +81,65 @@ MainWindow::MainWindow(QWidget *parent)
     , m_videoSequence(new VideoSequence())
 {
     setMinimumSize(1000, 640);
+
+    // ── Project resume / auto-create ─────────────────────────────────────
+    // Before any widget that reads a project path is constructed (notably
+    // MediaBinWidget), ensure a Project exists.  Priority:
+    //   1. Open the last-used project folder if QSettings remembers one and
+    //      its manifest still parses.
+    //   2. Otherwise create a fresh Untitled_{timestamp}/ folder under
+    //      Documents/LaMoshPit Projects/ so the app always starts in a
+    //      valid project.  File → New / Open lets the user switch later.
+    {
+        QSettings settings("LaMoshPit", "LaMoshPit");
+        const QString lastPath = settings.value("project/lastOpened").toString();
+
+        QString openErr;
+        if (!lastPath.isEmpty())
+            m_project = Project::open(lastPath, openErr);
+
+        if (!m_project) {
+            const QString root = defaultProjectsRoot();
+            const QString name = QString("Untitled_%1")
+                .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+            QString createErr;
+            m_project = Project::create(QDir(root).filePath(name), name, createErr);
+            if (!m_project) {
+                // Last-ditch: can't create in Documents, fall back to CWD.
+                // App still works, bin shows whatever imported_videos/ has.
+                m_project = Project::create(
+                    QDir::currentPath() + "/Untitled_" +
+                    QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"),
+                    "Untitled", createErr);
+            }
+        }
+        if (m_project) {
+            settings.setValue("project/lastOpened", m_project->folderPath());
+        }
+    }
+
     buildLayout();
+
+    // ── NLE Sequencer dock ────────────────────────────────────────────────
+    // Constructed before the menu bar so the View menu can pick up its
+    // toggleViewAction.  Hidden by default; the user reveals it via the
+    // View menu when they want to arrange clips or perform live.
+    m_seqProject = new sequencer::SequencerProject(this);
+    m_seqDock    = new sequencer::SequencerDock(m_seqProject, this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_seqDock);
+    m_seqDock->hide();
+
+    // Dock emits renderRequested when the user accepts the Render dialog.
+    // MainWindow owns the worker thread + progress reporting + post-render
+    // import-back — see onNleRenderRequested.
+    connect(m_seqDock, &sequencer::SequencerDock::renderRequested,
+            this,      &MainWindow::onNleRenderRequested);
+
     buildMenuBar();
+
+    const QString title = QString("LaMoshPit \u2014 %1")
+        .arg(m_project ? m_project->name() : "(no project)");
+    setWindowTitle(title);
     statusBar()->showMessage("LaMoshPit — Ready for chaos");
 }
 
@@ -180,17 +248,10 @@ void MainWindow::buildLayout()
     m_btnFlip->setToolTip("Mirror selected frames vertically (upside-down)");
     m_btnFlop->setToolTip("Mirror selected frames horizontally (left-right)");
 
-    // Undo
-    m_btnUndo = new QPushButton("\u21A9 Undo", ctrlRow);
-    m_btnUndo->setFixedHeight(30);
-    m_btnUndo->setMinimumWidth(80);
-    m_btnUndo->setEnabled(false);
-    m_btnUndo->setStyleSheet(
-        "QPushButton { background:#1a1800; color:#ffdd00; border:1.5px solid #ffdd00; "
-        "border-radius:4px; font:bold 9pt 'Consolas'; }"
-        "QPushButton:hover  { background:#222000; border-color:#ffee44; color:#ffee44; }"
-        "QPushButton:pressed { background:#333200; }"
-        "QPushButton:disabled { color:#3a3400; border-color:#2a2800; }");
+    // Undo button removed — replaced by non-destructive renders with Media Bin
+    // iteration history.  Ctrl+Z now walks VersionPathUtil::previousVersionPath
+    // to load the nearest older iteration.  See onLoadPreviousVersion + the
+    // QShortcut binding below in the constructor.
 
     ctrlLayout->addWidget(m_btnForceI);
     ctrlLayout->addWidget(m_btnForceP);
@@ -206,8 +267,6 @@ void MainWindow::buildLayout()
     ctrlLayout->addWidget(m_btnFlop);
     ctrlLayout->addSpacing(8);
     ctrlLayout->addWidget(m_btnDelete);
-    ctrlLayout->addSpacing(8);
-    ctrlLayout->addWidget(m_btnUndo);
 
     ctrlLayout->addStretch(1);
 
@@ -220,6 +279,18 @@ void MainWindow::buildLayout()
     m_bottomSplitter->setChildrenCollapsible(true);
     m_bottomSplitter->setHandleWidth(4);
 
+    // Media Bin lives to the LEFT of Quick Mosh.  Its root is the active
+    // project's imported_videos/ subdir — switching projects (File → Open)
+    // re-points it via setActiveProject().  The bin auto-refreshes after
+    // imports and renders and picks up thumbnails from the project's
+    // thumbnails/ subdir (populated by ThumbnailGenerator).
+    const QString importedVideosDir = m_project
+        ? m_project->importedVideosDir()
+        : QDir::currentPath() + "/imported_videos";
+    const QString thumbnailsDir = m_project
+        ? m_project->thumbnailsDir()
+        : QString();
+    m_mediaBin    = new MediaBinWidget(importedVideosDir, thumbnailsDir, this);
     m_quickMosh   = new QuickMoshWidget(this);
     m_progressBar = m_quickMosh->progressBar();  // progress bar lives in the Quick Mosh banner
     m_globalParams = new GlobalParamsWidget(this);
@@ -228,13 +299,25 @@ void MainWindow::buildLayout()
     m_bitstreamTest = new BitstreamTestWidget(this);
     m_bitstreamTest->setVisible(false);
 
+    // Lower splitter layout: MediaBin | QuickMosh | GlobalParams | BitstreamTest
+    m_bottomSplitter->addWidget(m_mediaBin);
     m_bottomSplitter->addWidget(m_quickMosh);
     m_bottomSplitter->addWidget(m_globalParams);
     m_bottomSplitter->addWidget(m_bitstreamTest);
-    m_bottomSplitter->setStretchFactor(0, 1);
-    m_bottomSplitter->setStretchFactor(1, 3);
-    m_bottomSplitter->setStretchFactor(2, 0);
-    m_bottomSplitter->setSizes({ 300, 900, 0 });
+    m_bottomSplitter->setStretchFactor(0, 1);  // MediaBin
+    m_bottomSplitter->setStretchFactor(1, 1);  // QuickMosh
+    m_bottomSplitter->setStretchFactor(2, 3);  // GlobalParams
+    m_bottomSplitter->setStretchFactor(3, 0);  // BitstreamTest
+    m_bottomSplitter->setSizes({ 260, 260, 800, 0 });
+
+    // MediaBin signals.  videoSelected → load the chosen video (same code
+    // path as File → Open, skipping re-import for files already in the
+    // imported_videos folder).  The Import button reuses openFile() so
+    // behaviour matches the menu action exactly.
+    connect(m_mediaBin, &MediaBinWidget::videoSelected,
+            this, &MainWindow::onMediaBinVideoSelected);
+    connect(m_mediaBin, &MediaBinWidget::importRequested,
+            this, &MainWindow::openFile);
 
     m_outerSplitter->addWidget(m_bottomSplitter);
 
@@ -282,10 +365,17 @@ void MainWindow::buildLayout()
     connect(m_btnInterpRight, &QPushButton::clicked, this, &MainWindow::onInterpRight);
     connect(m_btnFlip,       &QPushButton::clicked, this, &MainWindow::onFlip);
     connect(m_btnFlop,       &QPushButton::clicked, this, &MainWindow::onFlop);
-    connect(m_btnUndo,       &QPushButton::clicked, this, &MainWindow::onUndo);
 
     connect(m_timeline, &TimelineWidget::frameReorderRequested,
             this, &MainWindow::onFrameReorderRequested);
+
+    // Ctrl+Z: load the nearest older version of the current video from its
+    // family's vNN siblings.  Replaces the former single-level shadow-file
+    // undo — gives effectively unlimited "go back" via the Media Bin's
+    // accumulated iterations.  See onLoadPreviousVersion + VersionPathUtil.
+    auto* undoShortcut = new QShortcut(QKeySequence::Undo, this);
+    connect(undoShortcut, &QShortcut::activated,
+            this, &MainWindow::onLoadPreviousVersion);
 }
 
 // =============================================================================
@@ -296,10 +386,30 @@ void MainWindow::buildMenuBar()
 {
     // File menu
     auto* fileMenu = menuBar()->addMenu("&File");
-    fileMenu->addAction("&Open Video...", this, &MainWindow::openFile,
+
+    // Project lifecycle.  A project is a folder on disk containing all
+    // imports, render iterations, thumbnails, and logs — see core/project.
+    // Exactly one project is always active; File → New / Open switches.
+    fileMenu->addAction("&New Project...",  this, &MainWindow::onNewProject,
+                        QKeySequence("Ctrl+Shift+N"));
+    fileMenu->addAction("&Open Project...", this, &MainWindow::onOpenProject,
+                        QKeySequence("Ctrl+Shift+O"));
+    fileMenu->addAction("&Save Project",    this, &MainWindow::onSaveProject,
+                        QKeySequence("Ctrl+Shift+S"));
+    fileMenu->addSeparator();
+    // Multi-file import.  Each selected file is transcoded via DecodePipeline
+    // and lands in the active project's imported_videos/ subdir.
+    fileMenu->addAction("&Import Videos...", this, &MainWindow::openFile,
                         QKeySequence("Ctrl+O"));
     fileMenu->addAction("&Save Mosh Pit...", this, &MainWindow::saveHacked,
                         QKeySequence("Ctrl+S"));
+
+    // Application-wide preferences.
+    fileMenu->addSeparator();
+    fileMenu->addAction("S&ettings...", this, [this]() {
+        SettingsDialog dlg(this);
+        dlg.exec();
+    }, QKeySequence("Ctrl+,"));
 
     // View menu — toggle panel visibility
     auto* viewMenu = menuBar()->addMenu("&View");
@@ -320,6 +430,29 @@ void MainWindow::buildMenuBar()
     m_actQuickMosh   = makeViewAction("Quick Mosh",        m_quickMosh);
     m_actGlobalParams= makeViewAction("Global Parameters", m_globalParams);
     viewMenu->addSeparator();
+
+    // NLE Sequencer dock toggle — hidden by default.  Using a manual
+    // QAction rather than QDockWidget::toggleViewAction() because the latter
+    // can mis-sync its checked state when the dock is pre-hidden during
+    // construction, resulting in menu clicks that appear to do nothing.
+    if (m_seqDock) {
+        QAction* act = viewMenu->addAction("NLE Sequencer");
+        act->setCheckable(true);
+        act->setChecked(m_seqDock->isVisible());
+        connect(act, &QAction::triggered, this, [this, act](bool on) {
+            m_seqDock->setVisible(on);
+            if (on) {
+                m_seqDock->raise();
+                m_seqDock->setFocus();
+            }
+            act->setChecked(on);
+        });
+        // Keep the menu checkbox in sync if the user closes the dock via
+        // its title-bar X button (which bypasses our action).
+        connect(m_seqDock, &QDockWidget::visibilityChanged, this,
+                [act](bool visible) { act->setChecked(visible); });
+        viewMenu->addSeparator();
+    }
 
     // Debug tools — off by default
     m_actDebugTools = viewMenu->addAction("Debug Tools");
@@ -356,17 +489,25 @@ void MainWindow::togglePanel(QWidget* panel, QAction* action, const QString& /*n
 
 void MainWindow::openFile()
 {
-    QString fileName = QFileDialog::getOpenFileName(this,
-        "Open Video File", "",
+    if (!m_project) {
+        QMessageBox::warning(this, "No Project",
+            "No active project — cannot import videos.");
+        return;
+    }
+
+    // Batch import: user can select 1 or N files; we process them serially so
+    // a single splash + progress bar drives the whole operation.  Each file
+    // transcodes through DecodePipeline, lands in the project's
+    // imported_videos/, and then gets a thumbnail generated before we move
+    // on.  The LAST file to finish becomes the active video.
+    const QStringList fileList = QFileDialog::getOpenFileNames(this,
+        "Import Video(s)", "",
         "Video Files (*.mp4 *.mov *.mkv *.avi *.264 *.h264);;All Files (*.*)");
 
-    if (fileName.isEmpty()) return;
+    if (fileList.isEmpty()) return;
 
-    QDir importDir(QDir::currentPath() + "/imported_videos");
+    QDir importDir(m_project->importedVideosDir());
     if (!importDir.exists()) importDir.mkpath(".");
-
-    QString baseName   = QFileInfo(fileName).completeBaseName();
-    QString outputPath = importDir.absoluteFilePath(baseName + "_imported.mp4");
 
     // ── Splash dialog ─────────────────────────────────────────────────────────
     auto* splash = new QDialog(this, Qt::FramelessWindowHint | Qt::Dialog);
@@ -402,10 +543,14 @@ void MainWindow::openFile()
     headerLbl->setGraphicsEffect(glow);
     sLayout->addWidget(headerLbl);
 
-    // Pulse the glow
+    // Pulse the glow.  IMPORTANT: pulsePhase is captured by VALUE into a
+    // mutable lambda (was previously captured by reference to a stack-local
+    // that died as soon as openFile() returned — a pre-existing UB that
+    // single-file imports didn't live long enough to trip, but the longer
+    // batch flow reliably did).
     auto* pulseTimer = new QTimer(splash);
-    int pulsePhase = 0;
-    connect(pulseTimer, &QTimer::timeout, splash, [glow, &pulsePhase]() {
+    connect(pulseTimer, &QTimer::timeout, splash,
+        [glow, pulsePhase = 0]() mutable {
         pulsePhase = (pulsePhase + 6) % 360;
         double t = (1.0 + sin(pulsePhase * 3.14159265 / 180.0)) / 2.0;
         int alpha = 80 + (int)(175 * t);
@@ -468,44 +613,158 @@ void MainWindow::openFile()
     });
     progressTimer->start(60);
 
-    // ── Run standardizeVideo on a worker thread ───────────────────────────────
-    auto* watcher = new QFutureWatcher<bool>(splash);
-    connect(watcher, &QFutureWatcher<bool>::finished, this,
-            [this, splash, watcher, outputPath, baseName, progressBar, pctLabel]() {
-        bool ok = watcher->result();
-        progressBar->setValue(100);
-        pctLabel->setText("100%");
-        splash->close();
+    // ── Serial batch import state ────────────────────────────────────────────
+    // Heap-allocated so the chain of async callbacks can all see the same
+    // queue + progress state; torn down in the last finished() callback.
+    struct BatchCtx {
+        QStringList  remaining;           // absolute input paths still to do
+        int          total;               // total file count for "[N/T]" display
+        int          currentIdx;          // 1-based index of the file now running
+        QString      lastOutputPath;      // set on each success; drives final load
+        int          successCount;
+        int          failCount;
+        QStringList  failedNames;
+    };
+    auto* batch = new BatchCtx;
+    batch->remaining   = fileList;
+    batch->total       = fileList.size();
+    batch->currentIdx  = 0;
+    batch->successCount = 0;
+    batch->failCount   = 0;
 
-        if (!ok) {
-            statusBar()->showMessage("Import failed.");
-            QMessageBox::warning(this, "Import Failed", "Failed to transcode the video.");
+    // Mutable helper so the completion callback can re-invoke itself for the
+    // next file in the queue.  std::function wrapper gives the lambda access
+    // to its own name via the captured pointer.
+    auto* startOne = new std::function<void()>;
+
+    *startOne = [this, splash, batch, startOne, progressBar, pctLabel,
+                 statusLbl, progressCurrent, progressTotal, importDir]()
+    {
+        if (batch->remaining.isEmpty()) {
+            // All files processed — close splash, load the last one, report.
+            splash->close();
+
+            if (!batch->lastOutputPath.isEmpty()) {
+                m_currentVideoPath = batch->lastOutputPath;
+                const QString name = QFileInfo(m_currentVideoPath).fileName();
+                statusBar()->showMessage(
+                    QString("Imported %1 file%2 \u2014 loading %3 ...")
+                        .arg(batch->successCount)
+                        .arg(batch->successCount == 1 ? "" : "s")
+                        .arg(name));
+                m_preview->loadVideo(m_currentVideoPath);
+                m_videoSequence->load(m_currentVideoPath);
+                analyzeImportedVideo(m_currentVideoPath);
+                if (m_project) {
+                    m_project->setActiveVideo(m_currentVideoPath);
+                    QString saveErr; m_project->save(saveErr);
+                }
+                if (m_mediaBin) {
+                    m_mediaBin->refresh();
+                    m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+                }
+            }
+            if (batch->failCount > 0) {
+                QMessageBox::warning(this, "Some Imports Failed",
+                    QString("Imported %1 file(s), failed %2:\n\n%3")
+                        .arg(batch->successCount).arg(batch->failCount)
+                        .arg(batch->failedNames.join('\n')));
+            }
+
+            // Defer the self-destruct to a fresh stack.  Doing `delete
+            // startOne; delete batch;` inline here is a use-after-free in
+            // debug builds: `delete startOne` frees the std::function we're
+            // currently inside, destroying its capture storage, and the
+            // very next line re-reads `batch` from those captures.  The
+            // release build's register caching usually masked it, but
+            // debug compiled with no caching reliably crashed.
+            //
+            // Fix: copy the two pointers into the timer lambda's own
+            // captures (which are independent of startOne's captures) and
+            // delete them there, by which point startOne's body has fully
+            // returned and no captures are being read anymore.
+            QTimer::singleShot(0, [startOne, batch]() {
+                delete startOne;
+                delete batch;
+            });
             return;
         }
 
-        m_currentVideoPath = outputPath;
+        // Pull next file, reset progress, update splash status.
+        const QString fileName   = batch->remaining.takeFirst();
+        batch->currentIdx++;
+        const QString baseName   = QFileInfo(fileName).completeBaseName();
+        const QString outputPath = importDir.absoluteFilePath(baseName + "_imported.mp4");
 
-        if (m_hasUndo && !m_undoBackupPath.isEmpty()) {
-            QFile::remove(m_undoBackupPath);
-            m_hasUndo = false;
-        }
-        m_btnUndo->setEnabled(false);
+        progressBar->setValue(0);
+        pctLabel->setText("0%");
+        progressCurrent->store(0);
+        progressTotal->store(0);
+        statusLbl->setText(QString("[%1/%2] Transcoding: %3")
+            .arg(batch->currentIdx).arg(batch->total).arg(baseName));
 
-        statusBar()->showMessage("Imported: " + baseName + "_imported.mp4 \xe2\x80\x94 analyzing...");
-        m_preview->loadVideo(m_currentVideoPath);
-        m_videoSequence->load(m_currentVideoPath);
+        auto* watcher = new QFutureWatcher<bool>(splash);
+        QObject::connect(watcher, &QFutureWatcher<bool>::finished, splash,
+                [this, batch, startOne, watcher,
+                 outputPath, baseName, progressBar, pctLabel]()
+        {
+            const bool ok = watcher->result();
+            progressBar->setValue(100);
+            pctLabel->setText("100%");
 
-        analyzeImportedVideo(m_currentVideoPath);
-    });
+            if (ok) {
+                batch->successCount++;
+                batch->lastOutputPath = outputPath;
+                // Generate thumbnail for this import (best-effort).
+                if (m_project) {
+                    QString thumbErr;
+                    ThumbnailGenerator::generateMidFrameThumbnail(
+                        outputPath,
+                        m_project->thumbnailPathFor(outputPath),
+                        thumbErr);
+                }
+                // Refresh bin incrementally so the user sees imports appearing
+                // as they complete, not all at once at the end.
+                if (m_mediaBin) m_mediaBin->refresh();
+            } else {
+                batch->failCount++;
+                batch->failedNames << baseName;
+            }
+            watcher->deleteLater();
 
-    watcher->setFuture(QtConcurrent::run(
-            [fileName, outputPath, progressCurrent, progressTotal]() {
-        return DecodePipeline::standardizeVideo(fileName, outputPath,
-            [progressCurrent, progressTotal](int cur, int tot) {
-                progressCurrent->store(cur);
-                progressTotal->store(tot);
-            });
-    }));
+            // Defer the next iteration (or the final "all done" finalizer) to
+            // the next event-loop tick via a zero-delay single-shot.  Without
+            // this, the finalizer for the LAST file runs while we're still
+            // inside the watcher's finished() slot — and the heavy work it
+            // does (splash->close(), m_preview->loadVideo(), analyze, bin
+            // refresh) can spin a nested event loop that processes deferred
+            // deletes, tearing this watcher down from under us.  Files have
+            // already landed on disk by this point, which is why the next
+            // session shows both videos even though the app crashed.
+            //
+            // startOne is a heap-allocated std::function<void()>; the lambda
+            // captures the raw pointer so it can keep invoking itself.  By
+            // the time this timer fires, the watcher's slot has fully
+            // returned and we're safe to do splash close + video load.
+            QTimer::singleShot(0, this, [startOne]() { (*startOne)(); });
+        });
+
+        // Read the HW-on-import preference once per import so the user
+        // can flip it in Settings between files and have the next import
+        // honour the new choice.
+        const bool useHwEncode = SettingsDialog::importUsesHwEncode();
+        watcher->setFuture(QtConcurrent::run(
+                [fileName, outputPath, progressCurrent, progressTotal, useHwEncode]() {
+            return DecodePipeline::standardizeVideo(fileName, outputPath,
+                [progressCurrent, progressTotal](int cur, int tot) {
+                    progressCurrent->store(cur);
+                    progressTotal->store(tot);
+                },
+                useHwEncode);
+        }));
+    };
+
+    (*startOne)();  // kick off file 1
 }
 
 // =============================================================================
@@ -2314,16 +2573,9 @@ void MainWindow::onFrameReorderRequested(int sourceIdx, int insertBeforeIdx)
     // No-op: dropped at its own position or immediately after
     if (insertBeforeIdx == sourceIdx || insertBeforeIdx == sourceIdx + 1) return;
 
-    // Backup for undo
-    m_undoBackupPath = m_currentVideoPath + ".undo_backup.mp4";
-    QFile::remove(m_undoBackupPath);
-    if (!QFile::copy(m_currentVideoPath, m_undoBackupPath)) {
-        m_hasUndo = false;
-        m_btnUndo->setEnabled(false);
-    } else {
-        m_hasUndo = true;
-        m_btnUndo->setEnabled(false);
-    }
+    // Non-destructive: no shadow backup needed.  The render writes a new
+    // .vNN.mp4 sibling; the source stays on disk.  Ctrl+Z walks the version
+    // chain backwards via VersionPathUtil::previousVersionPath.
 
     m_preview->unloadVideo();
     m_transformBusy = true;
@@ -2401,18 +2653,10 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
         if (sel.isEmpty()) return;
     }
 
-    // Backup for undo
-    m_undoBackupPath = m_currentVideoPath + ".undo_backup.mp4";
-    QFile::remove(m_undoBackupPath);
-    if (!QFile::copy(m_currentVideoPath, m_undoBackupPath)) {
-        QMessageBox::warning(this, "Backup Failed",
-            "Could not create undo backup. Proceeding anyway (no undo available).");
-        m_hasUndo = false;
-        m_btnUndo->setEnabled(false);
-    } else {
-        m_hasUndo = true;
-        m_btnUndo->setEnabled(false);
-    }
+    // Non-destructive: no shadow backup needed — each render writes a new
+    // .vNN.mp4 sibling (see FrameTransformerWorker::commitVersionedOutput)
+    // and the source file stays intact.  Ctrl+Z walks backwards through the
+    // version chain via VersionPathUtil::previousVersionPath.
 
     m_preview->unloadVideo();
     m_transformBusy = true;
@@ -2435,7 +2679,8 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
                 /* bsMbType intentionally dropped here — feature migrated to
                  * GlobalEncodeParams::partitionMode.  The per-MB field is no
                  * longer set by any UI; checking it would be dead code. */
-                if (p.bsCbpZero > 0 || p.bsForceSkip > 0 ||
+                if (p.bsCbpZero > 0 || p.bsCbpZeroLuma > 0 || p.bsCbpZeroChroma > 0 ||
+                    p.bsForceSkip > 0 ||
                     p.bsIntraMode >= 0 ||
                     p.bsMvdX != 0 || p.bsMvdY != 0 ||
                     p.bsDctScale != 100) anyBS = true;
@@ -2496,7 +2741,7 @@ void MainWindow::onTransformProgress(int current, int /*total*/)
     m_progressBar->setValue(current);
 }
 
-void MainWindow::onTransformDone(bool success, QString errorMessage)
+void MainWindow::onTransformDone(bool success, QString errorMessage, QString outputPath)
 {
     m_transformBusy = false;
     m_quickMosh->setProgressVisible(false);
@@ -2504,46 +2749,341 @@ void MainWindow::onTransformDone(bool success, QString errorMessage)
     if (!success) {
         statusBar()->showMessage("Transform failed: " + errorMessage);
         QMessageBox::critical(this, "Transform Failed", errorMessage);
-        if (m_hasUndo) {
-            QFile::remove(m_currentVideoPath);
-            QFile::copy(m_undoBackupPath, m_currentVideoPath);
-        }
-        m_hasUndo = false;
-        m_btnUndo->setEnabled(false);
-        reloadVideoAndTimeline();
+        // Non-destructive renders can't corrupt the source, so there is nothing
+        // to roll back on failure — the source is untouched on disk.  Previous
+        // versions the user may have rendered remain in the bin.
         return;
     }
 
-    m_btnUndo->setEnabled(m_hasUndo);
+    // Swap the active video to the fresh iteration, preserving the source.
+    // Empty outputPath means the render was a no-op (e.g. reorder with
+    // source == destination) — in that case we just stay on the current file.
+    if (!outputPath.isEmpty())
+        m_currentVideoPath = outputPath;
+
+    // Generate thumbnail for the new render — best effort, non-blocking of UX
+    // if it fails (e.g. decode hiccup; next refresh shows a placeholder).
+    if (!outputPath.isEmpty() && m_project) {
+        QString thumbErr;
+        ThumbnailGenerator::generateMidFrameThumbnail(
+            outputPath,
+            m_project->thumbnailPathFor(outputPath),
+            thumbErr);
+    }
+
     statusBar()->showMessage("Transform complete — reloading...");
     reloadVideoAndTimeline();
+
+    // Stamp the project's active video so next launch resumes here.
+    if (m_project && !outputPath.isEmpty()) {
+        m_project->setActiveVideo(m_currentVideoPath);
+        QString saveErr; m_project->save(saveErr);
+    }
+
+    // Refresh the Media Bin so the new .vNN.mp4 appears under its source's
+    // expandable group, and highlight the freshly-active iteration so the
+    // user can see where they just landed in the version chain.
+    if (m_mediaBin) {
+        m_mediaBin->refresh();
+        m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+    }
 }
 
 // =============================================================================
-// Undo
+// Ctrl+Z — load previous version
+// =============================================================================
+//
+// Replaces the former shadow-file undo.  Walks VersionPathUtil to find the
+// nearest lower version in the current video's family on disk and loads it.
+// No-op if the current video is the root import (no earlier version to
+// step back to).
+
+// =============================================================================
+// Project lifecycle
 // =============================================================================
 
-void MainWindow::onUndo()
+QString MainWindow::defaultProjectsRoot()
 {
-    if (!m_hasUndo || m_undoBackupPath.isEmpty()) return;
-    if (!QFile::exists(m_undoBackupPath)) {
-        QMessageBox::warning(this, "Undo Failed", "Backup file missing.");
-        m_hasUndo = false;
-        m_btnUndo->setEnabled(false);
+    // ~/Documents/LaMoshPit Projects/ — the Windows convention for app data
+    // that the user expects to manage themselves (backups, shares, etc.).
+    // Created on first access so the folder always exists before any File
+    // dialog points at it.
+    const QString docs = QStandardPaths::writableLocation(
+        QStandardPaths::DocumentsLocation);
+    const QString root = docs + "/LaMoshPit Projects";
+    QDir().mkpath(root);
+    return root;
+}
+
+void MainWindow::setActiveProject(std::unique_ptr<Project> p)
+{
+    if (!p) return;
+
+    // Remember the new project's folder for next-launch resume.
+    QSettings settings("LaMoshPit", "LaMoshPit");
+    settings.setValue("project/lastOpened", p->folderPath());
+
+    // Tear down current video state — about to re-point at a different
+    // imported_videos folder and the currently-loaded video almost certainly
+    // isn't in the new project.
+    m_preview->unloadVideo();
+    m_currentVideoPath.clear();
+    m_lastAnalysis = AnalysisReport();
+
+    m_project = std::move(p);
+    setWindowTitle(QString("LaMoshPit \u2014 %1").arg(m_project->name()));
+
+    // Re-root the bin on the new project's imported_videos, then load the
+    // project's remembered active video if it still exists on disk.
+    if (m_mediaBin) {
+        // MediaBinWidget constructed with a fixed root; easiest is a fresh
+        // instance with the new path, swapped into the splitter.  Hold
+        // pointer to current, replace, delete old.
+        auto* oldBin = m_mediaBin;
+        const int idx = m_bottomSplitter->indexOf(oldBin);
+        m_mediaBin = new MediaBinWidget(m_project->importedVideosDir(),
+                                        m_project->thumbnailsDir(),
+                                        this);
+        connect(m_mediaBin, &MediaBinWidget::videoSelected,
+                this, &MainWindow::onMediaBinVideoSelected);
+        connect(m_mediaBin, &MediaBinWidget::importRequested,
+                this, &MainWindow::openFile);
+        m_bottomSplitter->insertWidget(idx, m_mediaBin);
+        oldBin->deleteLater();
+        // Preserve the splitter sizes (bin is index 0, stretch 1).
+    }
+
+    const QString resumePath = m_project->activeVideo();
+    if (!resumePath.isEmpty() && QFile::exists(resumePath)) {
+        m_currentVideoPath = resumePath;
+        m_preview->loadVideo(m_currentVideoPath);
+        m_videoSequence->load(m_currentVideoPath);
+        analyzeImportedVideo(m_currentVideoPath);
+        if (m_mediaBin) m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+    } else {
+        // No active video or it's gone — clear the timeline / MB editor.
+        populateTimeline(AnalysisReport{});
+    }
+
+    statusBar()->showMessage("Project: " + m_project->name());
+}
+
+void MainWindow::onNewProject()
+{
+    // Ask where to create.  Default parent = ~/Documents/LaMoshPit Projects/.
+    // The user picks an empty / new directory; we create it if needed.
+    const QString pick = QFileDialog::getSaveFileName(this,
+        "New Project \u2014 choose folder name",
+        defaultProjectsRoot() + "/Untitled",
+        "LaMoshPit Project (*)",
+        nullptr, QFileDialog::DontConfirmOverwrite);
+    if (pick.isEmpty()) return;
+
+    const QString name = QFileInfo(pick).fileName();
+    QString err;
+    auto project = Project::create(pick, name, err);
+    if (!project) {
+        QMessageBox::warning(this, "New Project Failed", err);
+        return;
+    }
+    setActiveProject(std::move(project));
+}
+
+void MainWindow::onOpenProject()
+{
+    const QString folder = QFileDialog::getExistingDirectory(this,
+        "Open Project \u2014 pick folder",
+        defaultProjectsRoot(),
+        QFileDialog::ShowDirsOnly);
+    if (folder.isEmpty()) return;
+
+    QString err;
+    auto project = Project::open(folder, err);
+    if (!project) {
+        QMessageBox::warning(this, "Open Project Failed", err);
+        return;
+    }
+    setActiveProject(std::move(project));
+}
+
+void MainWindow::onSaveProject()
+{
+    if (!m_project) return;
+    // Snapshot the current active video so next open restores it.
+    m_project->setActiveVideo(m_currentVideoPath);
+    QString err;
+    if (m_project->save(err))
+        statusBar()->showMessage("Project saved: " + m_project->name());
+    else
+        QMessageBox::warning(this, "Save Failed", err);
+}
+
+// =============================================================================
+// NLE render handler
+// =============================================================================
+//
+// Dock-driven flow:
+//   1. User opens the SequencerRenderDialog, picks track + range + encoder.
+//   2. Dock emits renderRequested(params, importIntoProject).
+//   3. We land here — fill in globalParams from the live mosh-editor panel
+//      if the user chose "Libx264FromGlobal", spawn the worker on a
+//      QThread, drive the main progress bar, and on completion handle the
+//      optional import-back to the project's imported_videos/ folder.
+//
+// Runs in parallel with everything else — users can keep editing the
+// timeline while a render is in progress; the worker snapshots the Params
+// at spawn time so mid-render edits don't corrupt the output.
+
+void MainWindow::onNleRenderRequested(const sequencer::SequencerRenderer::Params& incoming,
+                                      bool importIntoProject)
+{
+    if (!m_seqProject) return;
+    if (m_transformBusy) {
+        statusBar()->showMessage(
+            "A transform is already running \u2014 wait for it to finish.");
         return;
     }
 
-    statusBar()->showMessage("Undoing last transform...");
-    QFile::remove(m_currentVideoPath);
-    if (QFile::rename(m_undoBackupPath, m_currentVideoPath)) {
-        m_hasUndo = false;
-        m_btnUndo->setEnabled(false);
-        statusBar()->showMessage("Undo complete — reloading...");
-        reloadVideoAndTimeline();
-    } else {
-        QMessageBox::critical(this, "Undo Failed",
-            "Could not restore backup. The original may be lost.");
+    // Copy the dialog's params so we can patch in GlobalEncodeParams when
+    // the user chose the "Use current Global Encode Params" option.
+    sequencer::SequencerRenderer::Params params = incoming;
+    if (params.encoderMode
+        == sequencer::SequencerRenderer::EncoderMode::Libx264FromGlobal
+        && m_globalParams) {
+        params.globalParams = m_globalParams->currentParams();
     }
+
+    auto* worker = new sequencer::SequencerRenderer(m_seqProject, params);
+    auto* thread = new QThread(this);
+    worker->moveToThread(thread);
+
+    m_transformBusy = true;
+    if (m_quickMosh) m_quickMosh->setProgressVisible(true);
+    if (m_progressBar) {
+        m_progressBar->setRange(0, 100);
+        m_progressBar->setValue(0);
+    }
+    statusBar()->showMessage("Rendering NLE sequence\u2026");
+
+    connect(thread, &QThread::started, worker,
+            &sequencer::SequencerRenderer::run);
+    connect(worker, &sequencer::SequencerRenderer::progress, this,
+            [this](int cur, int total) {
+        if (total > 0 && m_progressBar) {
+            m_progressBar->setRange(0, total);
+            m_progressBar->setValue(cur);
+        }
+    });
+
+    // Completion — handle import-back + thumbnail + bin refresh on the GUI
+    // thread (this lambda runs on MainWindow's thread because `this` is the
+    // receiver context).
+    connect(worker, &sequencer::SequencerRenderer::done, this,
+            [this, importIntoProject]
+            (bool success, QString errMsg, QString outPath) {
+        m_transformBusy = false;
+        if (m_quickMosh) m_quickMosh->setProgressVisible(false);
+        if (!success) {
+            statusBar()->showMessage("NLE render failed: " + errMsg);
+            QMessageBox::critical(this, "Render Failed", errMsg);
+            return;
+        }
+
+        // If the output landed outside the project and the user asked for
+        // import-back, copy it into imported_videos/.  The file is already
+        // clean H.264/MP4; no re-transcode needed.
+        QString inProjectPath;
+        if (importIntoProject && m_project) {
+            const QString importsDir = m_project->importedVideosDir();
+            const QString outDir     = QFileInfo(outPath).absolutePath();
+            if (QDir(outDir).absolutePath() != QDir(importsDir).absolutePath()) {
+                const QString base  = QFileInfo(outPath).completeBaseName();
+                const QString dest  = QDir(importsDir).absoluteFilePath(
+                    base + "_imported.mp4");
+                QFile::remove(dest);
+                if (QFile::copy(outPath, dest)) {
+                    inProjectPath = dest;
+                    statusBar()->showMessage(
+                        "NLE render complete \u2014 imported as "
+                        + QFileInfo(dest).fileName());
+                } else {
+                    statusBar()->showMessage(
+                        "NLE render complete, but import-back copy failed.");
+                }
+            } else {
+                inProjectPath = outPath;
+                statusBar()->showMessage(
+                    "NLE render complete \u2014 "
+                    + QFileInfo(outPath).fileName());
+            }
+        } else {
+            statusBar()->showMessage(
+                "NLE render complete \u2014 "
+                + QFileInfo(outPath).fileName());
+        }
+
+        // Thumbnail + Media Bin refresh only when the file landed inside
+        // the project — ThumbnailGenerator writes into the project's
+        // thumbnails/ folder keyed by the imported filename.
+        if (!inProjectPath.isEmpty() && m_project) {
+            QString thumbErr;
+            ThumbnailGenerator::generateMidFrameThumbnail(
+                inProjectPath,
+                m_project->thumbnailPathFor(inProjectPath),
+                thumbErr);
+        }
+        if (m_mediaBin) m_mediaBin->refresh();
+    });
+
+    connect(worker, &sequencer::SequencerRenderer::done,
+            thread, &QThread::quit);
+    connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+// =============================================================================
+
+void MainWindow::onLoadPreviousVersion()
+{
+    if (m_currentVideoPath.isEmpty()) return;
+    const QString prev = VersionPathUtil::previousVersionPath(m_currentVideoPath);
+    if (prev.isEmpty()) {
+        statusBar()->showMessage("No earlier version in this video's family.");
+        return;
+    }
+    m_currentVideoPath = prev;
+    statusBar()->showMessage("Loaded previous version: " + QFileInfo(prev).fileName());
+    reloadVideoAndTimeline();
+    if (m_mediaBin) m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+}
+
+// =============================================================================
+// Media Bin — video selected from the tree
+// =============================================================================
+//
+// The bin emits this when the user double-clicks or picks "Load" from the
+// context menu.  Videos are already in imported_videos/ and have been
+// analyzable since their creation, so we skip the DecodePipeline transcode
+// that openFile() would run and go straight to the load + analyze pipeline
+// that openFile()'s completion callback uses.  A bin selection while a
+// render is in progress is ignored to avoid tearing down state mid-pipeline.
+
+void MainWindow::onMediaBinVideoSelected(const QString& videoPath)
+{
+    if (m_transformBusy) {
+        statusBar()->showMessage("Render in progress — ignoring bin selection.");
+        return;
+    }
+    if (videoPath.isEmpty() || !QFile::exists(videoPath)) return;
+    if (videoPath == m_currentVideoPath) return;  // already loaded
+
+    m_currentVideoPath = videoPath;
+    statusBar()->showMessage("Loading: " + QFileInfo(videoPath).fileName());
+    m_preview->loadVideo(m_currentVideoPath);
+    m_videoSequence->load(m_currentVideoPath);
+    analyzeImportedVideo(m_currentVideoPath);
+    if (m_mediaBin) m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
 }
 
 // =============================================================================

@@ -1283,12 +1283,27 @@ static void mb_analyse_inter_p16x16( x264_t *h, x264_mb_analysis_t *a )
          * downstream motion compensation doesn't dereference outside the
          * reference frame's padded region.  The mv_min_spel / mv_max_spel
          * bounds are populated by x264_macroblock_cache_load before analysis. */
-        int16_t mvx = h->fdec->mvd_x_override[mb_xy];
-        int16_t mvy = h->fdec->mvd_y_override[mb_xy];
+        int16_t mvxReq = h->fdec->mvd_x_override[mb_xy];
+        int16_t mvyReq = h->fdec->mvd_y_override[mb_xy];
+        int16_t mvx = mvxReq;
+        int16_t mvy = mvyReq;
         if( mvx < h->mb.mv_min_spel[0] ) mvx = h->mb.mv_min_spel[0];
         if( mvx > h->mb.mv_max_spel[0] ) mvx = h->mb.mv_max_spel[0];
         if( mvy < h->mb.mv_min_spel[1] ) mvy = h->mb.mv_min_spel[1];
         if( mvy > h->mb.mv_max_spel[1] ) mvy = h->mb.mv_max_spel[1];
+
+        /* LaMoshPit-Edge diagnostic.  Fires once per flagged MB.  Format:
+         *   MVDHOOK mb=N (x,y) req=(qx,qy) clip=(qx,qy) spelMin=(x,y) spelMax=(x,y)
+         * All MVs are in quarter-pel (qpel) units.  If req != clip, x264 clipped
+         * us; verify with spelMin/spelMax.  If this line never appears in the
+         * log but bsMvdX is being sent, the hook isn't being reached — earlier
+         * path (probe_pskip, b_force_intra, mb_info fast-skip) short-circuited. */
+        x264_log( h, X264_LOG_DEBUG,
+                  "MVDHOOK mb=%d (%d,%d) req=(%d,%d) clip=(%d,%d) spelMin=(%d,%d) spelMax=(%d,%d)\n",
+                  mb_xy, h->mb.i_mb_x, h->mb.i_mb_y,
+                  mvxReq, mvyReq, mvx, mvy,
+                  h->mb.mv_min_spel[0], h->mb.mv_min_spel[1],
+                  h->mb.mv_max_spel[0], h->mb.mv_max_spel[1] );
 
         a->l0.me16x16.cost     = 1; /* non-MAX so P_L0 wins SATD comparison */
         a->l0.me16x16.i_ref    = 0;
@@ -3877,6 +3892,18 @@ skip_analysis:
         && h->fdec->mvd_active_override
         && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
     {
+        /* LaMoshPit-Edge diagnostic.  Logs what state the RD pipeline left us
+         * in right before we restore P_L0 / D_16x16 for the final cache commit.
+         * preType / prePart is what RD picked (and we're overriding).  postMv
+         * is what me16x16.mv still holds — this SHOULD match the forced value
+         * we wrote in the hook; if it doesn't, something between the hook and
+         * here mutated a->l0.me16x16.mv. */
+        x264_log( h, X264_LOG_DEBUG,
+                  "MVDPOSTRD mb=%d preType=%d prePart=%d me16x16.mv=(%d,%d) i_rd16x16=%d\n",
+                  h->mb.i_mb_xy, h->mb.i_type, h->mb.i_partition,
+                  analysis.l0.me16x16.mv[0], analysis.l0.me16x16.mv[1],
+                  analysis.l0.i_rd16x16 );
+
         h->mb.i_type      = P_L0;
         h->mb.i_partition = D_16x16;
     }
@@ -3914,6 +3941,22 @@ skip_analysis:
 /*-------------------- Update MB from the analysis ----------------------*/
 static void analyse_update_cache( x264_t *h, x264_mb_analysis_t *a  )
 {
+    /* LaMoshPit-Edge diagnostic.  If we reach here with the MVD override
+     * active but i_type/i_partition not P_L0/D_16x16, our forced MV will NOT
+     * get committed — the switch below will fall into a different case and
+     * write different MVs (or no MVs at all, for intra types).  MVDMISS is
+     * the strongest signal that "bytes arrived, hook ran, but something
+     * downstream still redirected the commit away from us". */
+    if( h->fdec->mvd_active_override
+        && h->fdec->mvd_active_override[h->mb.i_mb_xy]
+        && !(h->mb.i_type == P_L0 && h->mb.i_partition == D_16x16) )
+    {
+        x264_log( h, X264_LOG_DEBUG,
+                  "MVDMISS mb=%d type=%d part=%d (expected P_L0=%d D_16x16=%d)\n",
+                  h->mb.i_mb_xy, h->mb.i_type, h->mb.i_partition,
+                  P_L0, D_16x16 );
+    }
+
     switch( h->mb.i_type )
     {
         case I_4x4:
@@ -3940,6 +3983,22 @@ static void analyse_update_cache( x264_t *h, x264_mb_analysis_t *a  )
             switch( h->mb.i_partition )
             {
                 case D_16x16:
+                    /* LaMoshPit-Edge diagnostic.  Logs the MV about to be
+                     * committed to the cache for flagged MBs.  This is the
+                     * last point in analysis before macroblock_encode runs;
+                     * whatever MV is here will be what the bitstream carries
+                     * (modulo predictor subtraction in CAVLC/CABAC encoding,
+                     * which only affects the MVD representation — not the
+                     * absolute MV). */
+                    if( h->fdec->mvd_active_override
+                        && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
+                    {
+                        x264_log( h, X264_LOG_DEBUG,
+                                  "MVDCOMMIT mb=%d type=P_L0 part=D_16x16 mv=(%d,%d) ref=%d\n",
+                                  h->mb.i_mb_xy,
+                                  a->l0.me16x16.mv[0], a->l0.me16x16.mv[1],
+                                  a->l0.me16x16.i_ref );
+                    }
                     x264_macroblock_cache_ref( h, 0, 0, 4, 4, 0, a->l0.me16x16.i_ref );
                     x264_macroblock_cache_mv_ptr( h, 0, 0, 4, 4, 0, a->l0.me16x16.mv );
                     break;

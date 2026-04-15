@@ -34,8 +34,11 @@ static QString expectedPresetType(PresetManager::Type t)
 }
 
 // ── JSON: FrameMBParams (no selectedMBs) ─────────────────────────────────────
+// These four helpers used to be file-static; promoted to public class members
+// (declared in PresetManager.h) so FrameTransformer can write sidecar JSON
+// next to each versioned render without duplicating the field list.
 
-static QJsonObject mbToJson(const FrameMBParams& p)
+QJsonObject PresetManager::mbToJson(const FrameMBParams& p)
 {
     QJsonObject o;
     o["qpDelta"]      = p.qpDelta;
@@ -65,17 +68,20 @@ static QJsonObject mbToJson(const FrameMBParams& p)
     o["tempDiffAmp"]  = p.tempDiffAmp;
     o["hueRotate"]    = p.hueRotate;
     // Bitstream-domain
-    o["bsMvdX"]       = p.bsMvdX;
-    o["bsMvdY"]       = p.bsMvdY;
-    o["bsForceSkip"]  = p.bsForceSkip;
-    o["bsIntraMode"]  = p.bsIntraMode;
-    o["bsMbType"]     = p.bsMbType;
-    o["bsDctScale"]   = p.bsDctScale;
-    o["bsCbpZero"]    = p.bsCbpZero;
+    o["bsMvdX"]            = p.bsMvdX;
+    o["bsMvdY"]            = p.bsMvdY;
+    o["bsSuppressResOnMvd"] = p.bsSuppressResOnMvd;
+    o["bsForceSkip"]       = p.bsForceSkip;
+    o["bsIntraMode"]       = p.bsIntraMode;
+    o["bsMbType"]          = p.bsMbType;
+    o["bsDctScale"]        = p.bsDctScale;
+    o["bsCbpZero"]         = p.bsCbpZero;
+    o["bsCbpZeroLuma"]     = p.bsCbpZeroLuma;
+    o["bsCbpZeroChroma"]   = p.bsCbpZeroChroma;
     return o;
 }
 
-static FrameMBParams jsonToMB(const QJsonObject& o)
+FrameMBParams PresetManager::jsonToMB(const QJsonObject& o)
 {
     FrameMBParams p;
     p.qpDelta      = o["qpDelta"].toInt(0);
@@ -105,19 +111,22 @@ static FrameMBParams jsonToMB(const QJsonObject& o)
     p.tempDiffAmp  = o["tempDiffAmp"].toInt(0);
     p.hueRotate    = o["hueRotate"].toInt(0);
     // Bitstream-domain
-    p.bsMvdX       = o["bsMvdX"].toInt(0);
-    p.bsMvdY       = o["bsMvdY"].toInt(0);
-    p.bsForceSkip  = o["bsForceSkip"].toInt(0);
-    p.bsIntraMode  = o["bsIntraMode"].toInt(-1);
-    p.bsMbType     = o["bsMbType"].toInt(-1);
-    p.bsDctScale   = o["bsDctScale"].toInt(100);
-    p.bsCbpZero    = o["bsCbpZero"].toInt(0);
+    p.bsMvdX             = o["bsMvdX"].toInt(0);
+    p.bsMvdY             = o["bsMvdY"].toInt(0);
+    p.bsSuppressResOnMvd = o["bsSuppressResOnMvd"].toInt(1);
+    p.bsForceSkip        = o["bsForceSkip"].toInt(0);
+    p.bsIntraMode        = o["bsIntraMode"].toInt(-1);
+    p.bsMbType           = o["bsMbType"].toInt(-1);
+    p.bsDctScale         = o["bsDctScale"].toInt(100);
+    p.bsCbpZero          = o["bsCbpZero"].toInt(0);
+    p.bsCbpZeroLuma      = o["bsCbpZeroLuma"].toInt(-1);
+    p.bsCbpZeroChroma    = o["bsCbpZeroChroma"].toInt(-1);
     return p;
 }
 
 // ── JSON: GlobalEncodeParams (no spatialMaskMBs) ──────────────────────────────
 
-static QJsonObject gpToJson(const GlobalEncodeParams& p)
+QJsonObject PresetManager::gpToJson(const GlobalEncodeParams& p)
 {
     QJsonObject o;
     o["gopSize"]       = p.gopSize;
@@ -173,7 +182,7 @@ static QJsonObject gpToJson(const GlobalEncodeParams& p)
     return o;
 }
 
-static GlobalEncodeParams jsonToGP(const QJsonObject& o)
+GlobalEncodeParams PresetManager::jsonToGP(const QJsonObject& o)
 {
     GlobalEncodeParams p;
     p.gopSize       = o["gopSize"].toInt(-1);

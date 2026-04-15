@@ -814,6 +814,11 @@ void x264_me_refine_qpel( x264_t *h, x264_me_t *m )
     if( h->fdec->mvd_active_override
         && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
     {
+        /* LaMoshPit-Edge diagnostic.  Logs that the refine_qpel guard fired
+         * (i.e. we prevented refinement from wandering off the forced MV). */
+        x264_log( h, X264_LOG_DEBUG,
+                  "MVDGUARD qpel mb=%d pixel=%d mv=(%d,%d)\n",
+                  h->mb.i_mb_xy, m->i_pixel, m->mv[0], m->mv[1] );
         if( m->i_pixel <= PIXEL_8x8 )
             m->cost -= m->i_ref_cost;
         return;
@@ -1259,7 +1264,15 @@ void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int
      * hook via x264_macroblock_cache_mv_ptr) stays intact. */
     if( h->fdec->mvd_active_override
         && h->fdec->mvd_active_override[h->mb.i_mb_xy] )
+    {
+        /* LaMoshPit-Edge diagnostic.  Logs that the refine_qpel_rd guard
+         * fired.  If this shows up but MVDCOMMIT doesn't, the cache commit
+         * is being redirected — check the MVDMISS line. */
+        x264_log( h, X264_LOG_DEBUG,
+                  "MVDGUARD qpelRD mb=%d i4=%d list=%d mv=(%d,%d)\n",
+                  h->mb.i_mb_xy, i4, i_list, m->mv[0], m->mv[1] );
         return;
+    }
 
     int16_t *cache_mv = h->mb.cache.mv[i_list][x264_scan8[i4]];
     const uint16_t *p_cost_mvx, *p_cost_mvy;
