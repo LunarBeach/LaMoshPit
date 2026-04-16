@@ -1,8 +1,8 @@
 #pragma once
 
-#include <QMainWindow>
 #include <QVector>
 #include <memory>
+#include <kddockwidgets/qtwidgets/views/MainWindow.h>
 #include "core/model/VideoSequence.h"
 #include "gui/BitstreamAnalyzer.h"
 #include "core/transform/FrameTransformer.h"
@@ -18,6 +18,7 @@ class PropertyPanel;
 class BitstreamTestWidget;
 class QuickMoshWidget;
 class MediaBinWidget;
+class ProgressPanel;
 // The NLE render slot's signature references SequencerRenderer::Params, so
 // the full header is pulled in here rather than forward-declared.
 #include "core/sequencer/SequencerRenderer.h"
@@ -31,8 +32,12 @@ class QProgressBar;
 class QLabel;
 class QAction;
 class QSplitter;
+class QDockWidget;
+class QMenu;
 
-class MainWindow : public QMainWindow {
+namespace KDDockWidgets { namespace QtWidgets { class DockWidget; } }
+
+class MainWindow : public KDDockWidgets::QtWidgets::MainWindow {
     Q_OBJECT
 
 public:
@@ -68,6 +73,11 @@ private slots:
     void onOpenProject();
     void onSaveProject();
 
+    // File → Import Selection Map.  Opens ImportSelectionMapDialog; the
+    // dialog handles probing the map, filtering compatible clips, copying
+    // the map into {project}/selection_maps/, and updating the sidecar.
+    void onImportSelectionMap();
+
     // Timeline drag-reorder
     void onFrameReorderRequested(int sourceIdx, int insertBeforeIdx);
 
@@ -95,12 +105,20 @@ private slots:
     void onQuickMoshSaveUserPreset();
     void onQuickMoshUserMosh(const QString& presetName);
 
-    // View menu panel toggles
-    void togglePanel(QWidget* panel, QAction* action, const QString& name);
+    // Layout menu — save/load named layouts via QSettings + saveState().
+    void onSaveLayoutAs();
+    void onLoadLayout(const QString& name);
+    void onResetLayout();
+    void rebuildLayoutMenu();
 
 private:
     void buildLayout();
     void buildMenuBar();
+    void applyDefaultLayout();
+    KDDockWidgets::QtWidgets::DockWidget* wrapInDock(const QString& title,
+                                                      QWidget* widget,
+                                                      const QString& uniqueName,
+                                                      int dockOptions = 0);
     void analyzeImportedVideo(const QString& videoPath);
     void populateTimeline(const AnalysisReport& report);
     void startTransform(FrameTransformerWorker::TargetType type,
@@ -109,6 +127,9 @@ private:
     void setTransformButtonsEnabled(bool enabled);
     void reloadVideoAndTimeline();
     bool eventFilter(QObject* obj, QEvent* e) override;
+    // Persist dock layout + window geometry so the next launch resumes where
+    // the user left off. Saved under QSettings key "layout/lastState".
+    void closeEvent(QCloseEvent* e) override;
 
     // Switch the active project.  Tears down current video state, re-points
     // the bin and import path at the new project's folders, and (if the
@@ -131,16 +152,36 @@ private:
     BitstreamTestWidget* m_bitstreamTest{ nullptr };
     QuickMoshWidget*     m_quickMosh   { nullptr };
     MediaBinWidget*      m_mediaBin    { nullptr };
+    ProgressPanel*       m_progressPanel{ nullptr };
 
     // NLE Sequencer — distinct from the single-clip TimelineWidget in the
     // mosh editor.  Dockable preview + (future) multi-track timeline.
     sequencer::SequencerProject* m_seqProject { nullptr };   // owned by MainWindow
     sequencer::SequencerDock*    m_seqDock    { nullptr };
 
-    // Outer splitters (kept for size restore on panel show)
-    QSplitter* m_topSplitter   { nullptr };
-    QSplitter* m_bottomSplitter{ nullptr };
-    QSplitter* m_outerSplitter { nullptr };
+    // Dock wrappers — one per panel, using KDDockWidgets so floating windows
+    // can themselves host nested splits and tabs (native QDockWidget only
+    // supports tab-grouping when floating, not side-by-side splits).
+    // MB Editor is split into two docks sharing the same MacroblockWidget
+    // coordinator — canvas view and controls view are siblings, not nested.
+    using KDDW_Dock = KDDockWidgets::QtWidgets::DockWidget;
+    KDDW_Dock* m_timelineDock      { nullptr };
+    KDDW_Dock* m_previewDock       { nullptr };
+    KDDW_Dock* m_mbCanvasDock      { nullptr };
+    KDDW_Dock* m_mbEditorDock      { nullptr };
+    KDDW_Dock* m_globalParamsDock  { nullptr };
+    KDDW_Dock* m_quickMoshDock     { nullptr };
+    KDDW_Dock* m_mediaBinDock      { nullptr };
+    KDDW_Dock* m_progressDock      { nullptr };
+    KDDW_Dock* m_propertyPanelDock { nullptr };
+    KDDW_Dock* m_bitstreamTestDock { nullptr };
+
+    // Central widget (timeline strip + frame-action buttons).
+    QWidget* m_timelineCentral { nullptr };
+
+    // Layout menu — repopulated whenever QSettings layout list changes.
+    QMenu* m_layoutMenu { nullptr };
+    QMenu* m_loadLayoutMenu { nullptr };
 
     // ── Timeline control buttons ──────────────────────────────────────────
     QPushButton*  m_btnForceI    { nullptr };
@@ -155,18 +196,13 @@ private:
     QPushButton*  m_btnFlop       { nullptr };
     // m_btnUndo removed — undo is now Ctrl+Z → load previous version from the
     // Media Bin's accumulated iterations.  See onLoadPreviousVersion.
-    QProgressBar* m_progressBar{ nullptr };
     QLabel*       m_selectionLabel{ nullptr };
 
     // ── View menu actions ─────────────────────────────────────────────────
-    QAction* m_actPreview    { nullptr };
-    QAction* m_actMBEditor   { nullptr };
-    QAction* m_actQuickMosh  { nullptr };
-    QAction* m_actGlobalParams{ nullptr };
+    // Most panels use their dock's toggleViewAction(). Debug Tools is kept
+    // manual because the BitstreamTest widget has no dock-friendly default
+    // size (it's a debug-only surface we want hidden until asked for).
     QAction* m_actDebugTools { nullptr };
-
-    // ── Preview pop-out state ─────────────────────────────────────────────
-    bool m_previewIsPopped { false };
 
     // ── State ─────────────────────────────────────────────────────────────
     VideoSequence* m_videoSequence;

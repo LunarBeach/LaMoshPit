@@ -48,13 +48,15 @@ void PreviewPlayer::setupUI()
     mainLayout->setSpacing(4);
 
     // Set up video widget
-    m_videoWidget->setMinimumSize(640, 360);
-    m_videoWidget->setStyleSheet("background-color: black; border: 2px solid #ff00ff;");
+    // Kept low so the containing dock can be resized freely by the user.
+    // Aspect ratio of the video is preserved by QVideoWidget regardless.
+    m_videoWidget->setMinimumSize(160, 90);
+    m_videoWidget->setStyleSheet("background-color: black; border: 2px solid #00ff88;");
 
     // Status label
     m_statusLabel = new QLabel("Video player ready", this);
     m_statusLabel->setAlignment(Qt::AlignCenter);
-    m_statusLabel->setStyleSheet("font-size: 14px; color: #ff00ff;");
+    m_statusLabel->setStyleSheet("font-size: 14px; color: #00ff88;");
 
     // Time label
     m_timeLabel = new QLabel("00:00 / 00:00", this);
@@ -117,9 +119,9 @@ void PreviewPlayer::setupUI()
     m_positionSlider->setRange(0, 0);
     m_positionSlider->setStyleSheet(
         "QSlider::groove:horizontal { background:#1e1e1e; height:5px; border-radius:2px; }"
-        "QSlider::handle:horizontal { background:#ff00ff; width:10px; height:10px; "
+        "QSlider::handle:horizontal { background:#00ff88; width:10px; height:10px; "
         "  margin:-3px 0; border-radius:5px; }"
-        "QSlider::sub-page:horizontal { background:#660066; border-radius:2px; }");
+        "QSlider::sub-page:horizontal { background:#004433; border-radius:2px; }");
 
     // ── Button row — centered group ──────────────────────────────────────────
     auto *buttonLayout = new QHBoxLayout;

@@ -1,5 +1,6 @@
-#include "GlobalParamsWidget.h"
+﻿#include "GlobalParamsWidget.h"
 #include "ToggleSwitch.h"
+#include "gui/AppFonts.h"
 
 #include "core/logger/ControlLogger.h"
 #include "core/presets/PresetManager.h"
@@ -8,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QScrollArea>
+#include <QTabWidget>
 #include <QLabel>
 #include <QComboBox>
 #include <QSpinBox>
@@ -20,50 +22,82 @@
 #include <QMessageBox>
 
 // =============================================================================
-// Style constants — updated dark theme (white / neon-green text)
+// Style builders â€” lazy because AppFonts families are only resolved after
+// QApplication construction loads the .otf resources. Plain static const
+// QStrings would initialize at program startup with "Sans Serif" fallbacks.
 // =============================================================================
 
-static const QString kSection =
-    "QLabel { color:#00ff88; font:bold 7pt 'Consolas'; "
-    "border-bottom:1px solid #1e1e1e; padding-bottom:2px; background:transparent; }";
+static QString kSection()
+{
+    return QString(
+        "QLabel { color:#00ff88; font-family:'%1','%2'; font-size:10pt; font-weight:bold; "
+        "letter-spacing:1px; border-bottom:1px solid #1e1e1e; "
+        "padding-bottom:3px; padding-top:2px; background:transparent; }"
+    ).arg(AppFonts::headingFamily(), AppFonts::bodyFamily());
+}
 
-static const QString kLabel =
-    "QLabel { color:#666666; font:7pt 'Consolas'; background:transparent; }";
+static QString kLabel()
+{
+    return QString(
+        "QLabel { color:#aaaaaa; font-family:'%1'; font-size:10pt; background:transparent; }"
+    ).arg(AppFonts::bodyFamily());
+}
 
-static const QString kSpin =
-    "QSpinBox { background:#111111; color:#cccccc; border:1px solid #282828; "
-    "border-radius:3px; font:7pt 'Consolas'; min-width:52px; }"
-    "QSpinBox:focus { border-color:#00ff88; }"
-    "QSpinBox:disabled { color:#333333; border-color:#1a1a1a; }";
+static QString kSpin()
+{
+    return QString(
+        "QSpinBox { background:#111111; color:#cccccc; border:1px solid #282828; "
+        "border-radius:3px; font-family:'%1'; font-size:10pt; min-width:60px; }"
+        "QSpinBox:focus { border-color:#00ff88; }"
+        "QSpinBox:disabled { color:#333333; border-color:#1a1a1a; }"
+    ).arg(AppFonts::bodyFamily());
+}
 
-static const QString kDSpin =
-    "QDoubleSpinBox { background:#111111; color:#cccccc; border:1px solid #282828; "
-    "border-radius:3px; font:7pt 'Consolas'; min-width:52px; }"
-    "QDoubleSpinBox:focus { border-color:#00ff88; }"
-    "QDoubleSpinBox:disabled { color:#333333; border-color:#1a1a1a; }";
+static QString kDSpin()
+{
+    return QString(
+        "QDoubleSpinBox { background:#111111; color:#cccccc; border:1px solid #282828; "
+        "border-radius:3px; font-family:'%1'; font-size:10pt; min-width:60px; }"
+        "QDoubleSpinBox:focus { border-color:#00ff88; }"
+        "QDoubleSpinBox:disabled { color:#333333; border-color:#1a1a1a; }"
+    ).arg(AppFonts::bodyFamily());
+}
 
-static const QString kCombo =
-    "QComboBox { background:#111111; color:#cccccc; border:1px solid #282828; "
-    "border-radius:3px; font:7pt 'Consolas'; padding:1px 4px; }"
-    "QComboBox:hover { border-color:#3a3a3a; }"
-    "QComboBox:focus { border-color:#00ff88; }"
-    "QComboBox::drop-down { border:none; width:14px; }"
-    "QComboBox QAbstractItemView { background:#111111; color:#cccccc; "
-    "selection-background-color:#1a1a1a; selection-color:#00ff88; "
-    "border:1px solid #282828; font:7pt 'Consolas'; }";
+static QString kCombo()
+{
+    return QString(
+        "QComboBox { background:#111111; color:#cccccc; border:1px solid #282828; "
+        "border-radius:3px; font-family:'%1'; font-size:10pt; padding:2px 6px; }"
+        "QComboBox:hover { border-color:#3a3a3a; }"
+        "QComboBox:focus { border-color:#00ff88; }"
+        "QComboBox::drop-down { border:none; width:16px; }"
+        "QComboBox QAbstractItemView { background:#111111; color:#cccccc; "
+        "selection-background-color:#1a1a1a; selection-color:#00ff88; "
+        "border:1px solid #282828; font-family:'%1'; font-size:10pt; }"
+    ).arg(AppFonts::bodyFamily());
+}
 
-static const QString kBtn =
-    "QPushButton { background:#111111; color:#888888; border:1px solid #282828; "
-    "border-radius:3px; font:bold 7pt 'Consolas'; padding:3px 8px; }"
-    "QPushButton:hover { background:#181818; color:#ffffff; border-color:#3a3a3a; }"
-    "QPushButton:disabled { color:#2a2a2a; border-color:#1a1a1a; }";
+static QString kBtn()
+{
+    // Button labels use Nodo per UI spec.
+    return QString(
+        "QPushButton { background:#111111; color:#aaaaaa; border:1px solid #282828; "
+        "border-radius:3px; font-family:'%1','%2'; font-size:10pt; padding:5px 12px; }"
+        "QPushButton:hover { background:#181818; color:#ffffff; border-color:#3a3a3a; }"
+        "QPushButton:disabled { color:#2a2a2a; border-color:#1a1a1a; }"
+    ).arg(AppFonts::displayFamily(), AppFonts::bodyFamily());
+}
 
-static const QString kApplyBtn =
-    "QPushButton { background:#0a1a0a; color:#00ff88; border:2px solid #00ff88; "
-    "border-radius:5px; font:bold 10pt 'Consolas'; padding:6px 14px; }"
-    "QPushButton:hover { background:#112211; border-color:#44ffaa; color:#44ffaa; }"
-    "QPushButton:pressed { background:#1a3a1a; }"
-    "QPushButton:disabled { color:#1a3a1a; border-color:#112211; }";
+static QString kApplyBtn()
+{
+    return QString(
+        "QPushButton { background:#0a1a0a; color:#00ff88; border:2px solid #00ff88; "
+        "border-radius:5px; font-family:'%1','%2'; font-size:12pt; padding:8px 18px; }"
+        "QPushButton:hover { background:#112211; border-color:#44ffaa; color:#44ffaa; }"
+        "QPushButton:pressed { background:#1a3a1a; }"
+        "QPushButton:disabled { color:#1a3a1a; border-color:#112211; }"
+    ).arg(AppFonts::displayFamily(), AppFonts::bodyFamily());
+}
 
 // =============================================================================
 // Helpers
@@ -72,14 +106,14 @@ static const QString kApplyBtn =
 static QLabel* makeSection(const QString& title, QWidget* parent)
 {
     auto* lbl = new QLabel(title, parent);
-    lbl->setStyleSheet(kSection);
+    lbl->setStyleSheet(kSection());
     return lbl;
 }
 
 static QLabel* makeLabel(const QString& text, QWidget* parent)
 {
     auto* lbl = new QLabel(text, parent);
-    lbl->setStyleSheet(kLabel);
+    lbl->setStyleSheet(kLabel());
     lbl->setWordWrap(false);
     return lbl;
 }
@@ -92,7 +126,7 @@ static QSpinBox* addSpin(QGridLayout* g, int row, int col,
     auto* sb = new QSpinBox(parent);
     sb->setRange(lo, hi);
     sb->setValue(defVal);
-    sb->setStyleSheet(kSpin);
+    sb->setStyleSheet(kSpin());
     sb->setFixedHeight(20);
     g->addWidget(sb, row, col * 2 + 1);
     return sb;
@@ -108,7 +142,7 @@ static QDoubleSpinBox* addDSpin(QGridLayout* g, int row, int col,
     sb->setValue(defVal);
     sb->setSingleStep(step);
     sb->setDecimals(2);
-    sb->setStyleSheet(kDSpin);
+    sb->setStyleSheet(kDSpin());
     sb->setFixedHeight(20);
     g->addWidget(sb, row, col * 2 + 1);
     return sb;
@@ -122,7 +156,7 @@ static QComboBox* addCombo(QGridLayout* g, int row, int col,
     auto* cb = new QComboBox(parent);
     cb->addItems(items);
     cb->setCurrentIndex(defIdx);
-    cb->setStyleSheet(kCombo);
+    cb->setStyleSheet(kCombo());
     cb->setFixedHeight(20);
     g->addWidget(cb, row, col * 2 + 1);
     return cb;
@@ -155,15 +189,12 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
     root->setSpacing(6);
 
     // ── Header ───────────────────────────────────────────────────────────────
+    // Big "GLOBAL ENCODE PARAMS" title removed — the dock title bar shows
+    // the panel name already. Preset combo remains.
     {
         auto* hdr = new QHBoxLayout;
-        auto* lbl = new QLabel("GLOBAL ENCODE PARAMS", this);
-        lbl->setStyleSheet("color:#ffffff; font:bold 9pt 'Consolas'; background:transparent;");
-        hdr->addWidget(lbl);
-        hdr->addStretch(1);
-
         auto* pLbl = new QLabel("Preset:", this);
-        pLbl->setStyleSheet("QLabel { color:#555555; font:7pt 'Consolas'; background:transparent; }");
+        pLbl->setStyleSheet(kLabel());
         hdr->addWidget(pLbl);
 
         m_presetCombo = new QComboBox(this);
@@ -179,7 +210,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
             "Temporal Bleed",
             "Data Corrupt"
         });
-        m_presetCombo->setStyleSheet(kCombo);
+        m_presetCombo->setStyleSheet(kCombo());
         m_presetCombo->setFixedHeight(22);
         m_presetCombo->setMinimumWidth(150);
         hdr->addWidget(m_presetCombo);
@@ -195,7 +226,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         m_btnUserPresetImport = new QPushButton("Import", this);
 
         for (QPushButton* b : {m_btnUserPresetSave, m_btnUserPresetDel, m_btnUserPresetImport})
-            b->setStyleSheet(kBtn);
+            b->setStyleSheet(kBtn());
 
         presetBtnRow->addWidget(m_btnUserPresetSave);
         presetBtnRow->addWidget(m_btnUserPresetDel);
@@ -211,7 +242,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         connect(m_btnUserPresetImport, &QPushButton::clicked, this, &GlobalParamsWidget::onUserPresetImport);
     }
 
-    // ── Kill I-Frames — prominent top-level toggle ───────────────────────────
+    // ── Kill I-Frames â€” prominent top-level toggle ───────────────────────────
     {
         m_cbKillIFrames = new ToggleSwitch(
             "Kill I-Frames  (force all I\u2192P, preserve frame count)", this);
@@ -220,7 +251,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
             "Forces every I-frame (except frame 0) to a P-frame during re-encode.\n"
             "Frame count stays the same. Breaks the GOP structure so the encoder\n"
             "cannot use intra prediction anywhere except the first frame.\n"
-            "Essential for classic datamoshing — combine with 'Infinite GOP' preset.");
+            "Essential for classic datamoshing â€” combine with 'Infinite GOP' preset.");
         root->addWidget(m_cbKillIFrames);
     }
 
@@ -262,24 +293,50 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         root->addWidget(line);
     }
 
-    // ── Scrollable parameter area ────────────────────────────────────────────
+    // ── Tabbed parameter area ────────────────────────────────────────────────
+    // Each addSection() call below becomes a tab instead of a collapsible
+    // section. `paramContainer` kept only as a logical parent for widgets
+    // created by makeLabel/addSpin/addCombo helpers (those take a QWidget*
+    // parent pointer).
     auto* paramContainer = new QWidget(this);
     paramContainer->setStyleSheet("background:#0a0a0a;");
-    auto* pv = new QVBoxLayout(paramContainer);
-    pv->setContentsMargins(0, 0, 0, 0);
-    pv->setSpacing(8);
+
+    auto* tabs = new QTabWidget(this);
+    tabs->setDocumentMode(true);
+    tabs->setStyleSheet(QString(
+        "QTabWidget::pane { background:#0a0a0a; border:1px solid #1e1e1e; top:-1px; }"
+        "QTabWidget::tab-bar { alignment:left; }"
+        "QTabBar::tab { background:#111111; color:#aaaaaa; "
+        "               padding:6px 12px; margin-right:2px; "
+        "               font-family:'%1','%2'; font-size:9pt; "
+        "               letter-spacing:1px; "
+        "               border-top-left-radius:4px; border-top-right-radius:4px; }"
+        "QTabBar::tab:selected { background:#0a2a1a; color:#00ff88; "
+        "                         border-bottom:2px solid #00ff88; }"
+        "QTabBar::tab:hover:!selected { background:#1a1a1a; color:#ffffff; }"
+    ).arg(AppFonts::headingFamily(), AppFonts::bodyFamily()));
 
     auto addSection = [&](const QString& title) -> QGridLayout* {
-        pv->addWidget(makeSection(title, paramContainer));
-        auto* inner = new QWidget(paramContainer);
-        inner->setStyleSheet("background:#0a0a0a;");
+        // Each tab page owns a vbox: grid at top, stretch at bottom so rows
+        // sit flush rather than expanding when the dock is tall.
+        auto* page = new QWidget;
+        auto* pv = new QVBoxLayout(page);
+        pv->setContentsMargins(8, 8, 8, 8);
+        pv->setSpacing(4);
+        auto* inner = new QWidget(page);
         auto* g = new QGridLayout(inner);
-        g->setContentsMargins(4, 4, 4, 4);
+        g->setContentsMargins(0, 0, 0, 0);
         g->setHorizontalSpacing(8);
         g->setVerticalSpacing(6);
         g->setColumnStretch(1, 1);
         g->setColumnStretch(3, 1);
         pv->addWidget(inner);
+        pv->addStretch(1);
+
+        // Strip the U+2500 box-drawing prefix and whitespace for the tab name.
+        QString clean = title;
+        clean.replace(QStringLiteral("\u2500"), QString());
+        tabs->addTab(page, clean.trimmed());
         return g;
     };
 
@@ -291,7 +348,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         m_sbGopSize->setRange(-1, 9999);
         m_sbGopSize->setValue(-1);
         m_sbGopSize->setToolTip("-1 = encoder default (250)\n0 = infinite GOP\n>0 = exact keyframe interval");
-        m_sbGopSize->setStyleSheet(kSpin);
+        m_sbGopSize->setStyleSheet(kSpin());
         m_sbGopSize->setFixedHeight(20);
         g->addWidget(m_sbGopSize, 0, 1);
 
@@ -322,24 +379,24 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
 
     // ── PARTITIONS & DCT ─────────────────────────────────────────────────────
     //
-    // Three dropdowns — one per H.264 slice type — controlling which partition
+    // Three dropdowns â€” one per H.264 slice type â€” controlling which partition
     // subdivisions x264 is allowed to emit.  Each dropdown maps to a subset of
     // x264's --partitions flag bits:
     //
-    //   I-frame MB Type → i4x4, i8x8  (intra partitions; note these also govern
+    //   I-frame MB Type â†’ i4x4, i8x8  (intra partitions; note these also govern
     //                     the minority of intra MBs that appear in P/B frames)
-    //   P-frame MB Type → p8x8, p4x4  (P-slice inter partitions; p4x4 implies p8x8)
-    //   B-frame MB Type → b8x8        (B-slice bi-directional inter partitions;
+    //   P-frame MB Type â†’ p8x8, p4x4  (P-slice inter partitions; p4x4 implies p8x8)
+    //   B-frame MB Type â†’ b8x8        (B-slice bi-directional inter partitions;
     //                     H.264 has no b4x4 so only two options for B)
     //
-    // Dropdown index → GlobalEncodeParams value (index − 1):
-    //   0 Default      → -1  (use x264's natural default for this frame type)
-    //   1 16×16 only   →  0  (no subdivision for this frame type)
-    //   2 +8×8         →  1  (one level of subdivision)
-    //   3 +8×8 +4×4    →  2  (full subdivision — I and P only)
+    // Dropdown index â†’ GlobalEncodeParams value (index âˆ’ 1):
+    //   0 Default      â†’ -1  (use x264's natural default for this frame type)
+    //   1 16Ã—16 only   â†’  0  (no subdivision for this frame type)
+    //   2 +8Ã—8         â†’  1  (one level of subdivision)
+    //   3 +8Ã—8 +4Ã—4    â†’  2  (full subdivision â€” I and P only)
     //
     // NOTE: Force Skip (MB Editor, per-MB) ALWAYS takes precedence on flagged
-    // MBs since skip MBs are 16×16 by spec and bypass partition analysis.
+    // MBs since skip MBs are 16Ã—16 by spec and bypass partition analysis.
     {
         auto* g = addSection("\u2500\u2500 MB TYPE (PER FRAME TYPE) & DCT");
         m_cbIFrameMbType = addCombo(g, 0, 0, "I-frame MB Type",
@@ -397,7 +454,7 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
 
     // ── RATE-CONTROL FIDELITY ────────────────────────────────────────────────
     // These parameters inhibit x264's ability to override per-MB user edits.
-    // Each control is gated by a toggle — OFF = x264 uses its own default.
+    // Each control is gated by a toggle â€” OFF = x264 uses its own default.
     {
         auto* g = addSection("\u2500\u2500 RATE-CONTROL FIDELITY");
 
@@ -430,65 +487,11 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
         addGatedDSpin(g, 2, 1, "QP Blur",        0.0, 10.0, 0.5, 0.1,  m_cbQblurEnable,    m_dsbQblur);
     }
 
-    // ── SPATIAL MASK ─────────────────────────────────────────────────────────
-    {
-        auto* g = addSection("\u2500\u2500 SPATIAL MASK (from MB Painter)");
-
-        m_maskLabel = new QLabel("No mask captured", paramContainer);
-        m_maskLabel->setStyleSheet(
-            "QLabel { color:#3a3a3a; font:7pt 'Consolas'; font-style:italic; background:transparent; }");
-        g->addWidget(m_maskLabel, 0, 0, 1, 4);
-
-        m_btnCaptureMask = new QPushButton("Capture Current MB Selection", paramContainer);
-        m_btnCaptureMask->setStyleSheet(kBtn);
-        m_btnCaptureMask->setFixedHeight(22);
-        g->addWidget(m_btnCaptureMask, 1, 0, 1, 2);
-
-        auto* clrBtn = new QPushButton("Clear Mask", paramContainer);
-        clrBtn->setStyleSheet(kBtn);
-        clrBtn->setFixedHeight(22);
-        g->addWidget(clrBtn, 1, 2, 1, 2);
-
-        g->addWidget(makeLabel("Mask QP (1..51)", paramContainer), 2, 0);
-        m_sbMaskQP = new QSpinBox(paramContainer);
-        m_sbMaskQP->setRange(1, 51);
-        m_sbMaskQP->setValue(51);
-        m_sbMaskQP->setStyleSheet(kSpin);
-        m_sbMaskQP->setFixedHeight(20);
-        g->addWidget(m_sbMaskQP, 2, 1);
-
-        connect(m_btnCaptureMask, &QPushButton::clicked, this, [this]() {
-            m_maskLabel->setText(
-                QString("%1 MBs captured as spatial mask").arg(m_spatialMask.size()));
-            m_maskLabel->setStyleSheet(
-                "QLabel { color:#00ff88; font:7pt 'Consolas'; background:transparent; }");
-        });
-        connect(clrBtn, &QPushButton::clicked, this, [this]() {
-            m_spatialMask.clear();
-            m_maskLabel->setText("No mask captured");
-            m_maskLabel->setStyleSheet(
-                "QLabel { color:#3a3a3a; font:7pt 'Consolas'; font-style:italic; background:transparent; }");
-        });
-    }
-
-    pv->addStretch(1);
-
-    auto* scrollArea = new QScrollArea(this);
-    scrollArea->setWidget(paramContainer);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->setStyleSheet(
-        "QScrollArea { background:#0a0a0a; border:none; }"
-        "QScrollBar:vertical { background:#0e0e0e; width:7px; border:none; }"
-        "QScrollBar::handle:vertical { background:#2a2a2a; border-radius:3px; min-height:20px; }"
-        "QScrollBar::handle:vertical:hover { background:#00ff88; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }");
-    root->addWidget(scrollArea, 1);
+    root->addWidget(tabs, 1);
 
     // ── Apply button ─────────────────────────────────────────────────────────
     m_btnApply = new QPushButton("RENDER", this);
-    m_btnApply->setStyleSheet(kApplyBtn);
+    m_btnApply->setStyleSheet(kApplyBtn());
     m_btnApply->setFixedHeight(34);
     m_btnApply->setToolTip(
         "Re-encodes the video applying all Global Params and any MB edits currently\n"
@@ -600,9 +603,6 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
     p.qblurEnabled         = m_cbQblurEnable->isChecked();
     p.qblur                = (float)m_dsbQblur->value();
 
-    p.spatialMaskMBs = m_spatialMask;
-    p.spatialMaskQP  = m_sbMaskQP->value();
-
     return p;
 }
 
@@ -674,18 +674,6 @@ void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
     m_cbQblurEnable->setChecked(p.qblurEnabled);
     m_dsbQblur->setValue(p.qblur);
     m_dsbQblur->setEnabled(p.qblurEnabled);
-}
-
-// =============================================================================
-// Spatial mask
-// =============================================================================
-
-void GlobalParamsWidget::updateSpatialMask(const QSet<int>& mbs)
-{
-    m_spatialMask = mbs;
-    if (!mbs.isEmpty())
-        m_maskLabel->setText(
-            QString("%1 MBs ready to capture").arg(mbs.size()));
 }
 
 // =============================================================================

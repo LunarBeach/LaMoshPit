@@ -202,9 +202,14 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
         // x264-specific params — only meaningful on the libx264 path.
         // HW encoders ignore priv_data "x264-params" and have their own
         // defaults that are fine for import standardisation.
+        //
+        // b-adapt=0: respect the decoded frame's pict_type hint so the import
+        // mirrors the source's original I/P/B structure.  With b-adapt=2
+        // (trellis lookahead) x264 overrides pict_type and often encodes
+        // everything as P, losing the source's B-frame placement.
         if (!usingHw) {
             av_opt_set(enc_ctx->priv_data, "x264-params",
-                       "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
+                       "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=0",
                        0);
         }
 
@@ -240,7 +245,7 @@ bool DecodePipeline::standardizeVideo(const QString& inputFile, const QString& o
                 enc_ctx->gop_size    = 9999;
                 enc_ctx->max_b_frames = 3;
                 av_opt_set(enc_ctx->priv_data, "x264-params",
-                           "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=2",
+                           "keyint=9999:min-keyint=1:scenecut=0:bframes=3:b-adapt=0",
                            0);
                 if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
                     enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;

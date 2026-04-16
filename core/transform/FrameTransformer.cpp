@@ -2287,16 +2287,17 @@ void FrameTransformerWorker::run()
             encCtx->qmax = m_globalParams.qpMax;
 
         // GOP size.
-        // When killIFrames is active we must use an infinite GOP (keyint=9999)
-        // regardless of the gopSize setting.  x264 WILL insert a forced IDR at
-        // every keyint boundary even when every frame is hinted as
-        // AV_PICTURE_TYPE_P — the keyint schedule is applied after frame-type
-        // decisions and cannot be overridden by pict_type alone.  With a 335-
-        // frame clip and the default gopSize=250 this produces an I-frame at
-        // frame 250 every single encode, which is exactly what the user sees.
-        // gopSize=0 is the user-visible "infinite GOP" option; killIFrames
-        // also forces it internally.
-        const int gopSize = (killI || m_globalParams.gopSize == 0) ? 9999
+        // x264 WILL insert a forced IDR at every keyint boundary even when
+        // every frame is hinted as AV_PICTURE_TYPE_P — the keyint schedule
+        // is applied after frame-type decisions and cannot be overridden by
+        // pict_type alone.  We must use an infinite GOP (keyint=9999) when:
+        //   • killIFrames is active (user explicitly wants no I-frames)
+        //   • ForceP / ForceB operation (user selected frames and forced
+        //     inter-prediction — x264 shouldn't override at frame 250)
+        //   • gopSize == 0 (user-visible "infinite GOP" option)
+        const bool forceInterType = (m_targetType == ForceP
+                                  || m_targetType == ForceB);
+        const int gopSize = (killI || forceInterType || m_globalParams.gopSize == 0) ? 9999
                           : (m_globalParams.gopSize > 0) ? m_globalParams.gopSize
                           : 250;
         encCtx->gop_size = gopSize;
@@ -2319,12 +2320,13 @@ void FrameTransformerWorker::run()
                      .arg(gopSize)
                      .arg(m_globalParams.scenecut ? 40 : 0);
         {
-            // When killing I-frames: force bframes=0, b-adapt=0.
+            // When killing I-frames OR forcing P/B types: bframes=0, b-adapt=0.
             // x264's B-frame lookahead (b-adapt=2) inserts I-frames to anchor
             // the B-frame reference chain even with scenecut=0 and forced P
             // pict_type hints.  No B-frames = no lookahead = no surprise I-frames.
-            int bf = killI ? 0 : (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
-            int ba = killI ? 0 : (m_globalParams.bAdapt  >= 0) ? m_globalParams.bAdapt  : 2;
+            const bool lockInter = killI || forceInterType;
+            int bf = lockInter ? 0 : (m_globalParams.bFrames >= 0) ? m_globalParams.bFrames : 3;
+            int ba = lockInter ? 0 : (m_globalParams.bAdapt  >= 0) ? m_globalParams.bAdapt  : 2;
             x264p += QString("bframes=%1:b-adapt=%2:").arg(bf).arg(ba);
         }
         if (m_globalParams.refFrames > 0)
@@ -2547,13 +2549,7 @@ void FrameTransformerWorker::run()
         }
 
         // Helper: stamp sequential PTS, encode one frame, drain any output packets.
-        // If a spatial mask is set in globalParams, inject a QP ROI for those MBs
-        // on every single encoded frame so the global mask acts as a persistent
-        // "damage zone" across the entire timeline.
         auto encodeAndDrain = [&](AVFrame* f) {
-            if (!m_globalParams.spatialMaskMBs.isEmpty())
-                applyQPROI(f, m_globalParams.spatialMaskMBs,
-                           m_globalParams.spatialMaskQP, mbCols);
             f->pts = outFrameCount * frameDuration;
             outFrameCount++;
             if (avcodec_send_frame(encCtx, f) == 0) {

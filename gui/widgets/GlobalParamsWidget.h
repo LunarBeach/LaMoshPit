@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QWidget>
-#include <QSet>
 
 #include "core/model/GlobalEncodeParams.h"
 #include "core/presets/PresetManager.h"
@@ -9,7 +8,6 @@
 class QComboBox;
 class QSpinBox;
 class QDoubleSpinBox;
-class QLabel;
 class QPushButton;
 class ToggleSwitch;
 
@@ -23,9 +21,7 @@ class ToggleSwitch;
 //
 // Key workflow:
 //   1. Pick a preset (or dial in custom values)
-//   2. Optionally capture the current MB painter selection as a "Spatial Mask"
-//      — that selection is then stamped as a QP ROI on EVERY encoded frame
-//   3. Click "Render" — re-encodes with these settings plus any active MB edits
+//   2. Click "Render" — re-encodes with these settings plus any active MB edits
 // =============================================================================
 class GlobalParamsWidget : public QWidget {
     Q_OBJECT
@@ -37,9 +33,6 @@ public:
 
     // Push a params struct into the UI controls (e.g. after loading a preset).
     void setParams(const GlobalEncodeParams& p);
-
-    // Called by MainWindow when the user paints MBs in the MB editor.
-    void updateSpatialMask(const QSet<int>& mbs);
 
 signals:
     void applyRequested();
@@ -124,12 +117,6 @@ private:
     QSpinBox*       m_sbDzIntra;
     ToggleSwitch*   m_cbQblurEnable;
     QDoubleSpinBox* m_dsbQblur;
-
-    // ── Spatial mask
-    QLabel*         m_maskLabel;
-    QSpinBox*       m_sbMaskQP;
-    QPushButton*    m_btnCaptureMask;
-    QSet<int>       m_spatialMask;
 
     QPushButton*    m_btnApply;
 

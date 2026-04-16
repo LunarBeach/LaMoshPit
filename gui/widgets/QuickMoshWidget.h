@@ -5,7 +5,6 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
-class QProgressBar;
 
 // =============================================================================
 // QuickMoshWidget
@@ -28,12 +27,6 @@ public:
     // Reload the preset combo from disk.
     void refreshUserPresets();
 
-    // Progress bar access — MainWindow drives this during transforms.
-    QProgressBar* progressBar() const { return m_progressBar; }
-
-    // Show/hide the progress area (bar + "Operation in progress..." label).
-    void setProgressVisible(bool visible);
-
 signals:
     void saveUserPresetRequested();
     void userMoshRequested(QString presetName);
@@ -46,8 +39,6 @@ private:
     QComboBox*    m_combo;        // user presets
     QLabel*       m_desc;
     QPushButton*  m_btnMosh;
-    QProgressBar* m_progressBar { nullptr };
-    QLabel*       m_opLabel     { nullptr };
 
     // Preset management buttons
     QPushButton* m_btnUserSave       { nullptr };

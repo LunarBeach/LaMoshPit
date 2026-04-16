@@ -1,11 +1,11 @@
 #include "QuickMoshWidget.h"
+#include "gui/AppFonts.h"
 
 #include "core/presets/PresetManager.h"
 
 #include <QComboBox>
 #include <QLabel>
 #include <QPushButton>
-#include <QProgressBar>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QInputDialog>
@@ -20,59 +20,8 @@ QuickMoshWidget::QuickMoshWidget(QWidget* parent)
     : QWidget(parent)
 {
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 4);
+    root->setContentsMargins(4, 4, 4, 4);
     root->setSpacing(4);
-
-    // ── Banner area: background image with progress bar ──────────────────────
-    {
-        auto* banner = new QWidget(this);
-        banner->setFixedHeight(80);
-        banner->setStyleSheet(
-            "background-image: url(:/assets/png/Load_Progress_BG_LaMoshPit.png);"
-            "background-repeat: no-repeat;"
-            "background-position: center;"
-            "border-bottom: 1px solid #330033;");
-
-        auto* bannerLayout = new QVBoxLayout(banner);
-        bannerLayout->setContentsMargins(16, 8, 16, 8);
-        bannerLayout->setSpacing(4);
-
-        // "Operation in progress..." status label
-        m_opLabel = new QLabel("Operation in progress...", banner);
-        m_opLabel->setAlignment(Qt::AlignCenter);
-        m_opLabel->setVisible(false);
-        m_opLabel->setStyleSheet(
-            "color:#00ff88; font:bold 8pt 'Consolas'; "
-            "background:#0a0a0a; border:none; padding:2px 8px; border-radius:3px;");
-        bannerLayout->addWidget(m_opLabel);
-
-        // Progress bar with percentage text
-        m_progressBar = new QProgressBar(banner);
-        m_progressBar->setFixedHeight(16);
-        m_progressBar->setRange(0, 100);
-        m_progressBar->setVisible(false);
-        m_progressBar->setTextVisible(true);
-        m_progressBar->setFormat("%p%");
-        m_progressBar->setAlignment(Qt::AlignCenter);
-        m_progressBar->setStyleSheet(
-            "QProgressBar { background:#0a0a0aCC; border:1px solid #00ff88; border-radius:6px; "
-            "color:#00ff88; font:bold 8pt 'Consolas'; }"
-            "QProgressBar::chunk { background:qlineargradient("
-            "x1:0,y1:0,x2:1,y2:0, stop:0 #003311, stop:0.5 #00ff88, stop:1 #003311); "
-            "border-radius:5px; }");
-        bannerLayout->addWidget(m_progressBar);
-        bannerLayout->addStretch(1);
-
-        root->addWidget(banner);
-    }
-
-    // ── "Quick Mosh" heading centered over the controls ──────────────────────
-    auto* header = new QLabel("QUICK MOSH ZONE", this);
-    header->setAlignment(Qt::AlignCenter);
-    header->setStyleSheet(
-        "font: bold 10pt 'Consolas'; color:#ff00ff; "
-        "background:transparent; padding:2px 0;");
-    root->addWidget(header);
 
     // ── Combo + Mosh Now row ─────────────────────────────────────────────────
     auto* controlsArea = new QWidget(this);
@@ -85,16 +34,18 @@ QuickMoshWidget::QuickMoshWidget(QWidget* parent)
     topRow->setSpacing(6);
 
     auto* comboLabel = new QLabel("Preset:", controlsArea);
-    comboLabel->setStyleSheet("color:#888; font:9pt 'Consolas';");
+    comboLabel->setStyleSheet(QString(
+        "QLabel { color:#bbbbbb; font-family:'%1'; font-size:10pt; background:transparent; }"
+    ).arg(AppFonts::bodyFamily()));
     topRow->addWidget(comboLabel);
 
     m_combo = new QComboBox(controlsArea);
     m_combo->setStyleSheet(
-        "QComboBox { background:#1a1a1a; color:#ff88ff; border:1px solid #663366; "
-        "font:bold 9pt 'Consolas'; padding:2px 6px; min-width:160px; }"
+        "QComboBox { background:#1a1a1a; color:#00ff88; border:1px solid #1a6633; "
+        "font-weight:bold; padding:2px 6px; min-width:160px; }"
         "QComboBox::drop-down { border:none; width:20px; }"
-        "QComboBox QAbstractItemView { background:#1a1a1a; color:#ff88ff; "
-        "selection-background-color:#441144; font:9pt 'Consolas'; }");
+        "QComboBox QAbstractItemView { background:#1a1a1a; color:#00ff88; "
+        "selection-background-color:#114433; }");
     topRow->addWidget(m_combo, 1);
 
     m_btnMosh = new QPushButton("Mosh Now!", controlsArea);
@@ -102,11 +53,11 @@ QuickMoshWidget::QuickMoshWidget(QWidget* parent)
     m_btnMosh->setMinimumWidth(110);
     m_btnMosh->setEnabled(false);
     m_btnMosh->setStyleSheet(
-        "QPushButton { background:#330033; color:#ff00ff; "
-        "border:2px solid #ff00ff; border-radius:4px; font:bold 11pt 'Consolas'; }"
-        "QPushButton:hover { background:#550055; color:#ffffff; border-color:#ffffff; }"
-        "QPushButton:pressed { background:#ff00ff; color:#000000; }"
-        "QPushButton:disabled { background:#1a1a1a; color:#443344; border-color:#332233; }");
+        "QPushButton { background:#0a2a1a; color:#00ff88; "
+        "border:2px solid #00ff88; border-radius:4px; font-weight:bold; font-size:11pt; }"
+        "QPushButton:hover { background:#1a4a2a; color:#ffffff; border-color:#ffffff; }"
+        "QPushButton:pressed { background:#00ff88; color:#000000; }"
+        "QPushButton:disabled { background:#1a1a1a; color:#334433; border-color:#223322; }");
     topRow->addWidget(m_btnMosh);
     controlsLayout->addLayout(topRow);
 
@@ -118,14 +69,18 @@ QuickMoshWidget::QuickMoshWidget(QWidget* parent)
     m_btnUserDel    = new QPushButton("Del",    controlsArea);
     m_btnUserImport = new QPushButton("Import", controlsArea);
 
-    const QString btnSS =
+    const QString btnSS = QString(
         "QPushButton { background:#1a1a1a; color:#aaa; border:1px solid #444; "
-        "font:7pt 'Consolas'; padding:2px 5px; border-radius:2px; }"
+        "font-family:'%1','%2'; font-size:9pt; padding:5px 12px; border-radius:3px; }"
         "QPushButton:hover { background:#222; color:#fff; border-color:#666; }"
-        "QPushButton:disabled { color:#333; border-color:#222; }";
+        "QPushButton:disabled { color:#333; border-color:#222; }"
+    ).arg(AppFonts::displayFamily(), AppFonts::bodyFamily());
     m_btnUserSave  ->setStyleSheet(btnSS);
     m_btnUserDel   ->setStyleSheet(btnSS);
     m_btnUserImport->setStyleSheet(btnSS);
+    m_btnUserSave  ->setMinimumHeight(28);
+    m_btnUserDel   ->setMinimumHeight(28);
+    m_btnUserImport->setMinimumHeight(28);
 
     btnRow->addWidget(m_btnUserSave);
     btnRow->addWidget(m_btnUserDel);
@@ -170,12 +125,6 @@ QuickMoshWidget::QuickMoshWidget(QWidget* parent)
 void QuickMoshWidget::setMoshEnabled(bool enabled)
 {
     m_btnMosh->setEnabled(enabled);
-}
-
-void QuickMoshWidget::setProgressVisible(bool visible)
-{
-    m_progressBar->setVisible(visible);
-    m_opLabel->setVisible(visible);
 }
 
 void QuickMoshWidget::refreshUserPresets()

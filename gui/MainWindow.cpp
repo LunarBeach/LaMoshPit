@@ -7,9 +7,11 @@
 #include "widgets/BitstreamTestWidget.h"
 #include "widgets/QuickMoshWidget.h"
 #include "widgets/MediaBinWidget.h"
+#include "widgets/ProgressPanel.h"
 #include "sequencer/SequencerDock.h"
 #include "core/sequencer/SequencerProject.h"
 #include "SettingsDialog.h"
+#include "gui/dialogs/ImportSelectionMapDialog.h"
 #include "BitstreamAnalyzer.h"
 #include "core/pipeline/DecodePipeline.h"
 #include "core/transform/FrameTransformer.h"
@@ -18,12 +20,21 @@
 #include "core/project/Project.h"
 #include "core/thumbnail/ThumbnailGenerator.h"
 #include "core/logger/ControlLogger.h"
+#include "AppFonts.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QSplitter>
+#include <QDockWidget>
 #include <QEvent>
+#include <QCloseEvent>
+#include <QLineEdit>
+#include <QMenu>
 #include <QMenuBar>
+#include <kddockwidgets/qtwidgets/views/DockWidget.h>
+#include <kddockwidgets/qtwidgets/views/MainWindow.h>
+#include <kddockwidgets/LayoutSaver.h>
+#include <kddockwidgets/KDDockWidgets.h>
 #include <QStatusBar>
 #include <QFileDialog>
 #include <QMessageBox>
@@ -60,15 +71,17 @@ static QPushButton* makeTimelineBtn(const QString& text,
                                     QWidget* parent)
 {
     auto* b = new QPushButton(text, parent);
-    b->setFixedHeight(30);
-    b->setMinimumWidth(88);
+    b->setFixedHeight(32);
+    b->setMinimumWidth(96);
     b->setEnabled(false);
     b->setStyleSheet(
         QString("QPushButton { background:#0d0d0d; color:%1; border:1.5px solid %1; "
-                "border-radius:4px; font:bold 9pt 'Consolas'; padding:0 8px; }"
+                "border-radius:4px; font-family:'%2','%3'; font-size:10pt; "
+                "font-weight:bold; padding:0 10px; }"
                 "QPushButton:hover { background:#181818; border-color:#ffffff; color:#ffffff; }"
                 "QPushButton:pressed { background:#222; }"
-                "QPushButton:disabled { color:#2a2a2a; border-color:#1e1e1e; }").arg(color));
+                "QPushButton:disabled { color:#2a2a2a; border-color:#1e1e1e; }")
+            .arg(color, AppFonts::displayFamily(), AppFonts::bodyFamily()));
     return b;
 }
 
@@ -77,10 +90,15 @@ static QPushButton* makeTimelineBtn(const QString& text,
 // =============================================================================
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
+    : KDDockWidgets::QtWidgets::MainWindow(
+          QStringLiteral("LaMoshPitMain"),
+          KDDockWidgets::MainWindowOption_None,
+          parent)
     , m_videoSequence(new VideoSequence())
 {
-    setMinimumSize(1000, 640);
+    // KDDW's View<> template shadows QWidget::setMinimumSize(int,int) with
+    // a different signature, so reach through the QMainWindow base.
+    QMainWindow::setMinimumSize(1000, 640);
 
     // ── Project resume / auto-create ─────────────────────────────────────
     // Before any widget that reads a project path is constructed (notably
@@ -120,20 +138,23 @@ MainWindow::MainWindow(QWidget *parent)
 
     buildLayout();
 
-    // ── NLE Sequencer dock ────────────────────────────────────────────────
-    // Constructed before the menu bar so the View menu can pick up its
-    // toggleViewAction.  Hidden by default; the user reveals it via the
-    // View menu when they want to arrange clips or perform live.
     m_seqProject = new sequencer::SequencerProject(this);
     m_seqDock    = new sequencer::SequencerDock(m_seqProject, this);
-    addDockWidget(Qt::BottomDockWidgetArea, m_seqDock);
-    m_seqDock->hide();
-
-    // Dock emits renderRequested when the user accepts the Render dialog.
-    // MainWindow owns the worker thread + progress reporting + post-render
-    // import-back — see onNleRenderRequested.
+    m_seqDock->setObjectName("dock_Sequencer");
     connect(m_seqDock, &sequencer::SequencerDock::renderRequested,
             this,      &MainWindow::onNleRenderRequested);
+
+    applyDefaultLayout();
+    {
+        QSettings settings("LaMoshPit", "LaMoshPit");
+        const QByteArray savedGeom   = settings.value("layout/lastGeometry").toByteArray();
+        const QByteArray savedLayout = settings.value("layout/kddwLayout").toByteArray();
+        if (!savedGeom.isEmpty()) restoreGeometry(savedGeom);
+        if (!savedLayout.isEmpty()) {
+            KDDockWidgets::LayoutSaver saver;
+            saver.restoreLayout(savedLayout);
+        }
+    }
 
     buildMenuBar();
 
@@ -149,67 +170,43 @@ MainWindow::~MainWindow()
 }
 
 // =============================================================================
-// buildLayout — the 4-quadrant + timeline strip design
+// buildLayout — QDockWidget-based layout.
 //
-//  ┌──────────────────────────────────────────────────┐
-//  │  Preview Player  │  MB Editor                    │  ← top splitter
-//  ├──────────────────┴───────────────────────────────┤
-//  │  Timeline ─────────────────────────  [buttons]   │  ← timeline panel
-//  ├──────────────────┬───────────────────────────────┤
-//  │  Quick Mosh      │  Global Encode Params          │  ← bottom splitter
-//  └──────────────────┴───────────────────────────────┘
+// Central widget: the clip timeline strip (always present).
+// Every other panel is a QDockWidget — users can float, tab-group, or close
+// them. Layout state is saved/restored via QMainWindow::saveState() + a
+// per-name QSettings entry (see onSaveLayoutAs / onLoadLayout).
+//
+// Default placement (applyDefaultLayout):
+//   ┌──────────────────────────────────────────────────────────────────┐
+//   │ Preview (L) │ Timeline central │ MB Editor / Sequencer tabs (R) │
+//   ├──────────────────────────────────────────────────────────────────┤
+//   │ Media Bin │ Quick Mosh │ Global Encode Params │ (Debug Tools)    │
+//   └──────────────────────────────────────────────────────────────────┘
 // =============================================================================
+
+KDDockWidgets::QtWidgets::DockWidget*
+MainWindow::wrapInDock(const QString& title, QWidget* widget,
+                       const QString& uniqueName, int dockOptions)
+{
+    // KDDW uses uniqueName (not parent-based objectName) as the key for
+    // LayoutSaver persistence. Title is what appears in the dock tab/strip.
+    auto* dock = new KDDockWidgets::QtWidgets::DockWidget(
+        uniqueName, KDDockWidgets::DockWidgetOptions(dockOptions));
+    dock->setTitle(title);
+    dock->setWidget(widget);
+    return dock;
+}
 
 void MainWindow::buildLayout()
 {
-    // ── Outer vertical splitter ──────────────────────────────────────────────
-    m_outerSplitter = new QSplitter(Qt::Vertical, this);
-    m_outerSplitter->setChildrenCollapsible(false);
-    m_outerSplitter->setHandleWidth(4);
-
-    // ── TOP: Preview (left) | MB Editor (right) ─────────────────────────────
-    m_topSplitter = new QSplitter(Qt::Horizontal);
-    m_topSplitter->setChildrenCollapsible(true);
-    m_topSplitter->setHandleWidth(4);
-
-    m_preview  = new PreviewPlayer(this);
-    m_mbWidget = new MacroblockWidget(this);
-
-    // Pop-out / re-dock the preview player to a floating window.
-    connect(m_preview, &PreviewPlayer::popOutRequested, this, [this]() {
-        if (m_previewIsPopped) {
-            // Re-dock: move back into the top splitter at position 0
-            m_topSplitter->insertWidget(0, m_preview);
-            m_preview->show();
-            m_previewIsPopped = false;
-        } else {
-            // Float: detach from splitter, make it a top-level window
-            m_preview->setParent(nullptr);
-            m_preview->setWindowTitle("Preview \u2014 LaMoshPit");
-            m_preview->setAttribute(Qt::WA_DeleteOnClose, false);
-            m_preview->installEventFilter(this);
-            m_preview->resize(900, 560);
-            m_preview->show();
-            m_previewIsPopped = true;
-        }
-    });
-
-    m_topSplitter->addWidget(m_preview);
-    m_topSplitter->addWidget(m_mbWidget);
-    m_topSplitter->setStretchFactor(0, 3);
-    m_topSplitter->setStretchFactor(1, 2);
-    m_topSplitter->setSizes({ 800, 540 });
-
-    m_outerSplitter->addWidget(m_topSplitter);
-
-    // ── MIDDLE: Timeline panel (full width) ──────────────────────────────────
+    // ── Central widget: clip timeline + frame-action buttons ────────────────
     auto* timelinePanel = new QWidget(this);
     timelinePanel->setObjectName("TimelinePanel");
     timelinePanel->setStyleSheet(
         "#TimelinePanel { background:#080808; border-top:1px solid #1e1e1e; "
         "                 border-bottom:1px solid #1e1e1e; }");
-    timelinePanel->setMinimumHeight(100);
-    timelinePanel->setMaximumHeight(160);
+    timelinePanel->setMinimumHeight(140);
 
     auto* tlLayout = new QVBoxLayout(timelinePanel);
     tlLayout->setContentsMargins(0, 0, 0, 0);
@@ -272,67 +269,63 @@ void MainWindow::buildLayout()
 
     tlLayout->addWidget(ctrlRow);
 
-    m_outerSplitter->addWidget(timelinePanel);
+    m_timelineCentral = timelinePanel;
+    // Regular closable dock — user can hide it from the View menu like any
+    // other panel, or drag it to a second monitor.
+    m_timelineDock = wrapInDock("Timeline", timelinePanel, "dock_Timeline");
 
-    // ── BOTTOM: Quick Mosh (left) | Global Params (right) ───────────────────
-    m_bottomSplitter = new QSplitter(Qt::Horizontal);
-    m_bottomSplitter->setChildrenCollapsible(true);
-    m_bottomSplitter->setHandleWidth(4);
+    // ── Construct panel widgets ─────────────────────────────────────────────
+    m_preview  = new PreviewPlayer(nullptr);
+    m_mbWidget = new MacroblockWidget(nullptr);
 
-    // Media Bin lives to the LEFT of Quick Mosh.  Its root is the active
-    // project's imported_videos/ subdir — switching projects (File → Open)
-    // re-points it via setActiveProject().  The bin auto-refreshes after
-    // imports and renders and picks up thumbnails from the project's
-    // thumbnails/ subdir (populated by ThumbnailGenerator).
     const QString importedVideosDir = m_project
         ? m_project->importedVideosDir()
         : QDir::currentPath() + "/imported_videos";
     const QString thumbnailsDir = m_project
         ? m_project->thumbnailsDir()
         : QString();
-    m_mediaBin    = new MediaBinWidget(importedVideosDir, thumbnailsDir, this);
-    m_quickMosh   = new QuickMoshWidget(this);
-    m_progressBar = m_quickMosh->progressBar();  // progress bar lives in the Quick Mosh banner
-    m_globalParams = new GlobalParamsWidget(this);
+    m_mediaBin     = new MediaBinWidget(importedVideosDir, thumbnailsDir, nullptr);
+    m_quickMosh    = new QuickMoshWidget(nullptr);
+    m_globalParams = new GlobalParamsWidget(nullptr);
+    m_progressPanel = new ProgressPanel(nullptr);
+    m_propertyPanel = new PropertyPanel(nullptr);
+    m_bitstreamTest = new BitstreamTestWidget(nullptr);
 
-    // Bitstream debug widget — hidden by default, toggled from View menu
-    m_bitstreamTest = new BitstreamTestWidget(this);
-    m_bitstreamTest->setVisible(false);
+    // ── Wrap each panel in a QDockWidget ────────────────────────────────────
+    // MacroblockWidget exposes two sibling view widgets (canvas + controls)
+    // but retains single ownership of state / signals / slots, so splitting
+    // them across two docks changes zero behaviour.
+    m_mbWidget->setParent(this);
+    m_previewDock       = wrapInDock("Preview Player",      m_preview,                 "dock_Preview");
+    m_mbCanvasDock      = wrapInDock("MB Grid Canvas",      m_mbWidget->canvasPanel(), "dock_MBCanvas");
+    m_mbEditorDock      = wrapInDock("MB Editor",           m_mbWidget->controlsPanel(),"dock_MBEditor");
+    m_mediaBinDock      = wrapInDock("Media Bin",           m_mediaBin,                "dock_MediaBin");
+    m_quickMoshDock     = wrapInDock("Quick Mosh",          m_quickMosh,               "dock_QuickMosh");
+    m_globalParamsDock  = wrapInDock("Global Encode Params",m_globalParams,            "dock_GlobalParams");
+    m_progressDock      = wrapInDock("Progress",            m_progressPanel,           "dock_Progress");
+    m_propertyPanelDock = wrapInDock("Properties",          m_propertyPanel,           "dock_Properties");
+    m_bitstreamTestDock = wrapInDock("Bitstream Debug",     m_bitstreamTest,           "dock_BitstreamTest");
 
-    // Lower splitter layout: MediaBin | QuickMosh | GlobalParams | BitstreamTest
-    m_bottomSplitter->addWidget(m_mediaBin);
-    m_bottomSplitter->addWidget(m_quickMosh);
-    m_bottomSplitter->addWidget(m_globalParams);
-    m_bottomSplitter->addWidget(m_bitstreamTest);
-    m_bottomSplitter->setStretchFactor(0, 1);  // MediaBin
-    m_bottomSplitter->setStretchFactor(1, 1);  // QuickMosh
-    m_bottomSplitter->setStretchFactor(2, 3);  // GlobalParams
-    m_bottomSplitter->setStretchFactor(3, 0);  // BitstreamTest
-    m_bottomSplitter->setSizes({ 260, 260, 800, 0 });
+    // Pop-out button on PreviewPlayer now toggles its dock's float state.
+    connect(m_preview, &PreviewPlayer::popOutRequested, this, [this]() {
+        m_previewDock->setFloating(!m_previewDock->isFloating());
+    });
 
-    // MediaBin signals.  videoSelected → load the chosen video (same code
-    // path as File → Open, skipping re-import for files already in the
-    // imported_videos folder).  The Import button reuses openFile() so
-    // behaviour matches the menu action exactly.
+    // Pop-out button inside the MB canvas nav bar floats the canvas dock.
+    // MB Canvas dock's topLevelChanged updates the button icon so it stays
+    // in sync with reality (user can also float via the dock title bar).
+    connect(m_mbWidget, &MacroblockWidget::canvasFloatToggleRequested, this, [this]() {
+        m_mbCanvasDock->setFloating(!m_mbCanvasDock->isFloating());
+    });
+    connect(m_mbCanvasDock,
+            &KDDockWidgets::QtWidgets::DockWidget::isFloatingChanged,
+            m_mbWidget, &MacroblockWidget::setCanvasFloatingIcon);
+
+    // MediaBin signals — same routing as before.
     connect(m_mediaBin, &MediaBinWidget::videoSelected,
             this, &MainWindow::onMediaBinVideoSelected);
     connect(m_mediaBin, &MediaBinWidget::importRequested,
             this, &MainWindow::openFile);
-
-    m_outerSplitter->addWidget(m_bottomSplitter);
-
-    // Outer splitter proportions: top=~480, timeline=120, bottom=~300
-    m_outerSplitter->setStretchFactor(0, 3);
-    m_outerSplitter->setStretchFactor(1, 0);
-    m_outerSplitter->setStretchFactor(2, 2);
-    m_outerSplitter->setSizes({ 480, 120, 300 });
-
-    // The outer splitter IS the central widget
-    setCentralWidget(m_outerSplitter);
-
-    // ── Stub widgets (not shown in main layout) ──────────────────────────────
-    m_propertyPanel = new PropertyPanel(this);
-    m_propertyPanel->setVisible(false);
 
     // ── Signal connections ────────────────────────────────────────────────────
     connect(m_timeline, &TimelineWidget::selectionChanged,
@@ -343,9 +336,6 @@ void MainWindow::buildLayout()
 
     connect(m_mbWidget, &MacroblockWidget::frameNavigated,
             this, &MainWindow::onMBFrameNavigated);
-
-    connect(m_mbWidget, &MacroblockWidget::mbSelectionChanged,
-            m_globalParams, &GlobalParamsWidget::updateSpatialMask);
 
     connect(m_globalParams, &GlobalParamsWidget::applyRequested,
             this, &MainWindow::onApplyGlobalParams);
@@ -401,6 +391,8 @@ void MainWindow::buildMenuBar()
     // and lands in the active project's imported_videos/ subdir.
     fileMenu->addAction("&Import Videos...", this, &MainWindow::openFile,
                         QKeySequence("Ctrl+O"));
+    fileMenu->addAction("Import Selection &Map...", this,
+                        &MainWindow::onImportSelectionMap);
     fileMenu->addAction("&Save Mosh Pit...", this, &MainWindow::saveHacked,
                         QKeySequence("Ctrl+S"));
 
@@ -408,79 +400,189 @@ void MainWindow::buildMenuBar()
     fileMenu->addSeparator();
     fileMenu->addAction("S&ettings...", this, [this]() {
         SettingsDialog dlg(this);
-        dlg.exec();
+        if (dlg.exec() == QDialog::Accepted && m_mbWidget) {
+            // Pick up any UI-preference changes (e.g. selection overlay hue).
+            m_mbWidget->refreshSelectionColor();
+        }
     }, QKeySequence("Ctrl+,"));
 
-    // View menu — toggle panel visibility
+    // View menu — KDDW docks expose toggleAction() (auto-synced with dock
+    // open/close state, floating, tab-grouping). The NLE sequencer is still
+    // a QDockWidget so it uses toggleViewAction().
     auto* viewMenu = menuBar()->addMenu("&View");
-
-    auto makeViewAction = [&](const QString& name, QWidget* panel) -> QAction* {
-        auto* act = viewMenu->addAction(name);
-        act->setCheckable(true);
-        act->setChecked(true);
-        connect(act, &QAction::triggered, this, [this, panel, act, name]() {
-            togglePanel(panel, act, name);
-        });
-        return act;
-    };
-
-    m_actPreview     = makeViewAction("Preview Player",    m_preview);
-    m_actMBEditor    = makeViewAction("MB Editor",         m_mbWidget);
+    viewMenu->addAction(m_timelineDock     ->toggleAction());
+    viewMenu->addAction(m_previewDock      ->toggleAction());
+    viewMenu->addAction(m_mbCanvasDock     ->toggleAction());
+    viewMenu->addAction(m_mbEditorDock     ->toggleAction());
     viewMenu->addSeparator();
-    m_actQuickMosh   = makeViewAction("Quick Mosh",        m_quickMosh);
-    m_actGlobalParams= makeViewAction("Global Parameters", m_globalParams);
+    viewMenu->addAction(m_mediaBinDock     ->toggleAction());
+    viewMenu->addAction(m_quickMoshDock    ->toggleAction());
+    viewMenu->addAction(m_globalParamsDock ->toggleAction());
+    viewMenu->addAction(m_progressDock     ->toggleAction());
     viewMenu->addSeparator();
-
-    // NLE Sequencer dock toggle — hidden by default.  Using a manual
-    // QAction rather than QDockWidget::toggleViewAction() because the latter
-    // can mis-sync its checked state when the dock is pre-hidden during
-    // construction, resulting in menu clicks that appear to do nothing.
     if (m_seqDock) {
-        QAction* act = viewMenu->addAction("NLE Sequencer");
-        act->setCheckable(true);
-        act->setChecked(m_seqDock->isVisible());
-        connect(act, &QAction::triggered, this, [this, act](bool on) {
-            m_seqDock->setVisible(on);
-            if (on) {
-                m_seqDock->raise();
-                m_seqDock->setFocus();
-            }
-            act->setChecked(on);
-        });
-        // Keep the menu checkbox in sync if the user closes the dock via
-        // its title-bar X button (which bypasses our action).
-        connect(m_seqDock, &QDockWidget::visibilityChanged, this,
-                [act](bool visible) { act->setChecked(visible); });
-        viewMenu->addSeparator();
+        QAction* seqAct = m_seqDock->toggleViewAction();
+        seqAct->setText("NLE Sequencer");
+        viewMenu->addAction(seqAct);
     }
+    viewMenu->addAction(m_propertyPanelDock->toggleAction());
+    viewMenu->addSeparator();
 
-    // Debug tools — off by default
-    m_actDebugTools = viewMenu->addAction("Debug Tools");
-    m_actDebugTools->setCheckable(true);
-    m_actDebugTools->setChecked(false);
-    connect(m_actDebugTools, &QAction::triggered, this, [this](bool on) {
-        m_bitstreamTest->setVisible(on);
-        // Re-expand bottom splitter when debug panel appears
-        if (on) {
-            QList<int> sz = m_bottomSplitter->sizes();
-            if (sz.size() >= 3 && sz[2] < 100) {
-                sz[2] = 220;
-                m_bottomSplitter->setSizes(sz);
-            }
-        }
-    });
+    // Debug tools — BitstreamTest dock, hidden by default.
+    m_actDebugTools = m_bitstreamTestDock->toggleAction();
+    m_actDebugTools->setText("Debug Tools");
+    viewMenu->addAction(m_actDebugTools);
+
+    // ── Layout menu ─────────────────────────────────────────────────────────
+    // Save/load named layouts via QSettings. Each named layout stores the
+    // full QMainWindow state (dock positions, sizes, floating, tabs) and
+    // window geometry. Reset restores the compiled-in default.
+    m_layoutMenu = menuBar()->addMenu("&Layout");
+    m_layoutMenu->addAction("&Save Layout As...", this,
+                            &MainWindow::onSaveLayoutAs,
+                            QKeySequence("Ctrl+Shift+L"));
+    m_loadLayoutMenu = m_layoutMenu->addMenu("&Load Layout");
+    m_layoutMenu->addSeparator();
+    m_layoutMenu->addAction("&Reset to Default", this,
+                            &MainWindow::onResetLayout);
+    rebuildLayoutMenu();
 }
 
 // =============================================================================
-// Panel visibility toggle
+// Default layout
 // =============================================================================
 
-void MainWindow::togglePanel(QWidget* panel, QAction* action, const QString& /*name*/)
+void MainWindow::applyDefaultLayout()
 {
-    bool nowVisible = !panel->isVisible();
-    panel->setVisible(nowVisible);
-    action->setChecked(nowVisible);
+    using KDDockWidgets::Location_OnLeft;
+    using KDDockWidgets::Location_OnRight;
+    using KDDockWidgets::Location_OnBottom;
+    using KDDockWidgets::Location_OnTop;
 
+    // Timeline is the anchor other docks reference. Preview on the left of
+    // it, MB canvas + editor to the right. Bottom row: media bin / quick
+    // mosh / global params.
+    addDockWidget(m_timelineDock,     Location_OnTop);
+    addDockWidget(m_previewDock,      Location_OnLeft,  m_timelineDock);
+    addDockWidget(m_mbCanvasDock,     Location_OnRight, m_timelineDock);
+    addDockWidget(m_mbEditorDock,     Location_OnRight, m_mbCanvasDock);
+    addDockWidget(m_mediaBinDock,     Location_OnBottom);
+    addDockWidget(m_quickMoshDock,    Location_OnRight, m_mediaBinDock);
+    addDockWidget(m_globalParamsDock, Location_OnRight, m_quickMoshDock);
+    addDockWidget(m_progressDock,     Location_OnTop,   m_quickMoshDock);
+
+    // SequencerDock is a QDockWidget subclass and can't participate in the
+    // KDDW layout. Kept as a standalone floating window, shown via View menu.
+    // All its hotkey / render / timeline behavior is preserved.
+    if (m_seqDock) {
+        m_seqDock->setFloating(true);
+        m_seqDock->hide();
+    }
+
+    // Stubs / debug — not docked on first launch; View menu re-opens them.
+    m_bitstreamTestDock->close();
+    m_propertyPanelDock->close();
+}
+
+// =============================================================================
+// Layout menu — save/load named layouts
+// =============================================================================
+
+void MainWindow::onSaveLayoutAs()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Save Layout",
+        "Name for this layout:", QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+
+    KDDockWidgets::LayoutSaver saver;
+    const QByteArray layout = saver.serializeLayout();
+
+    QSettings settings("LaMoshPit", "LaMoshPit");
+    settings.setValue(QString("layouts/%1/kddw").arg(name),     layout);
+    settings.setValue(QString("layouts/%1/geometry").arg(name), saveGeometry());
+
+    QStringList names = settings.value("layouts/index").toStringList();
+    if (!names.contains(name)) {
+        names << name;
+        settings.setValue("layouts/index", names);
+    }
+    rebuildLayoutMenu();
+    statusBar()->showMessage(QString("Saved layout \"%1\"").arg(name), 3000);
+}
+
+void MainWindow::onLoadLayout(const QString& name)
+{
+    QSettings settings("LaMoshPit", "LaMoshPit");
+    const QByteArray layout = settings.value(QString("layouts/%1/kddw").arg(name)).toByteArray();
+    const QByteArray geom   = settings.value(QString("layouts/%1/geometry").arg(name)).toByteArray();
+    if (layout.isEmpty()) {
+        QMessageBox::warning(this, "Load Layout",
+            QString("Layout \"%1\" not found.").arg(name));
+        return;
+    }
+    if (!geom.isEmpty()) restoreGeometry(geom);
+    KDDockWidgets::LayoutSaver saver;
+    saver.restoreLayout(layout);
+    statusBar()->showMessage(QString("Loaded layout \"%1\"").arg(name), 3000);
+}
+
+void MainWindow::onResetLayout()
+{
+    // Close every dock, then replay applyDefaultLayout. KDDW handles
+    // tearing down nested splits / floats cleanly when a dock is closed.
+    for (KDDW_Dock* d : { m_timelineDock, m_previewDock, m_mbCanvasDock,
+                          m_mbEditorDock, m_mediaBinDock, m_quickMoshDock,
+                          m_globalParamsDock, m_progressDock,
+                          m_propertyPanelDock, m_bitstreamTestDock }) {
+        if (d) d->close();
+    }
+    if (m_seqDock) {
+        m_seqDock->hide();
+    }
+    applyDefaultLayout();
+    m_timelineDock->open();
+    m_previewDock->open();
+    m_mbCanvasDock->open();
+    m_mbEditorDock->open();
+    m_mediaBinDock->open();
+    m_quickMoshDock->open();
+    m_globalParamsDock->open();
+    m_progressDock->open();
+    statusBar()->showMessage("Reset to default layout", 3000);
+}
+
+void MainWindow::rebuildLayoutMenu()
+{
+    if (!m_loadLayoutMenu) return;
+    m_loadLayoutMenu->clear();
+
+    QSettings settings("LaMoshPit", "LaMoshPit");
+    const QStringList names = settings.value("layouts/index").toStringList();
+    if (names.isEmpty()) {
+        QAction* empty = m_loadLayoutMenu->addAction("(no saved layouts)");
+        empty->setEnabled(false);
+        return;
+    }
+    for (const QString& name : names) {
+        m_loadLayoutMenu->addAction(name, this, [this, name]() {
+            onLoadLayout(name);
+        });
+    }
+    m_loadLayoutMenu->addSeparator();
+    m_loadLayoutMenu->addAction("Manage...", this, [this]() {
+        QSettings s("LaMoshPit", "LaMoshPit");
+        QStringList names = s.value("layouts/index").toStringList();
+        if (names.isEmpty()) return;
+        bool ok = false;
+        const QString toDelete = QInputDialog::getItem(this, "Delete Layout",
+            "Select a layout to delete:", names, 0, false, &ok);
+        if (!ok || toDelete.isEmpty()) return;
+        s.remove(QString("layouts/%1").arg(toDelete));
+        names.removeAll(toDelete);
+        s.setValue("layouts/index", names);
+        rebuildLayoutMenu();
+    });
 }
 
 // =============================================================================
@@ -531,11 +633,12 @@ void MainWindow::openFile()
 
     sLayout->addStretch(1);
 
-    // Header text with pulsing glow
+    // Header text with pulsing glow — Nodo for dramatic display-size text.
     auto* headerLbl = new QLabel("You might think you're ready...\nbut you're not.", splash);
     headerLbl->setAlignment(Qt::AlignCenter);
+    headerLbl->setFont(AppFonts::display(22));
     headerLbl->setStyleSheet(
-        "color:#00ff88; font:bold 16pt 'Consolas'; background:transparent; border:none;");
+        "color:#00ff88; background:transparent; border:none;");
     auto* glow = new QGraphicsDropShadowEffect(headerLbl);
     glow->setColor(QColor(0x00, 0xff, 0x88, 180));
     glow->setBlurRadius(20);
@@ -2580,9 +2683,9 @@ void MainWindow::onFrameReorderRequested(int sourceIdx, int insertBeforeIdx)
     m_preview->unloadVideo();
     m_transformBusy = true;
     setTransformButtonsEnabled(false);
-    m_quickMosh->setProgressVisible(true);
-    m_progressBar->setRange(0, total);
-    m_progressBar->setValue(0);
+    m_progressPanel->setProgressVisible(true);
+    m_progressPanel->setRange(0, total);
+    m_progressPanel->setValue(0);
     statusBar()->showMessage(
         QString("Reordering: moving frame %1 to position %2 ...")
             .arg(sourceIdx).arg(insertBeforeIdx));
@@ -2634,11 +2737,15 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
              globalParams.noFastPSkip || globalParams.noDctDecimate ||
              globalParams.cabacDisable || globalParams.noDeblock ||
              globalParams.psyRD >= 0.0f || globalParams.aqMode != -1 ||
-             globalParams.mbTreeDisable || !globalParams.spatialMaskMBs.isEmpty());
+             globalParams.mbTreeDisable);
 
         // Hidden panel logic: if MB editor is not visible, treat its edit map
         // as empty so no invisible state can silently corrupt the encode.
-        bool mbVisible = m_mbWidget->isVisible();
+        // m_mbWidget itself is a hidden coordinator; check whether either
+        // of its visual docks (canvas or editor) is open to decide if the
+        // user has the MB editing surface available.
+        bool mbVisible = (m_mbCanvasDock && m_mbCanvasDock->isOpen())
+                      || (m_mbEditorDock && m_mbEditorDock->isOpen());
         if (!mbVisible && !hasGlobalChange) {
             statusBar()->showMessage(
                 "Nothing to apply — MB Editor is hidden and no global changes are set.");
@@ -2661,9 +2768,9 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
     m_preview->unloadVideo();
     m_transformBusy = true;
     setTransformButtonsEnabled(false);
-    m_quickMosh->setProgressVisible(true);
-    m_progressBar->setRange(0, m_lastAnalysis.frames.size());
-    m_progressBar->setValue(0);
+    m_progressPanel->setProgressVisible(true);
+    m_progressPanel->setRange(0, m_lastAnalysis.frames.size());
+    m_progressPanel->setValue(0);
 
     if (type == FrameTransformerWorker::MBEditOnly) {
         // Detect whether any frame carries a bitstream-surgery knob — the
@@ -2709,7 +2816,13 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
         origTypes.append(f.pictType);
 
     // Only send MB edits when the MB editor is visible (hidden-panel logic).
-    MBEditMap edits = m_mbWidget->isVisible() ? m_mbWidget->editMap() : MBEditMap{};
+    // Only apply MB edits when the user explicitly clicks RENDER (MBEditOnly).
+    // Structural operations (Force I/P/B, Delete, Dup, Interp, Flip/Flop)
+    // should NOT bake in pending MB edits — the user may still be mid-edit
+    // and expects the type change to be an isolated operation.
+    MBEditMap edits = (type == FrameTransformerWorker::MBEditOnly)
+                      ? m_mbWidget->editMap()
+                      : MBEditMap{};
 
     auto* worker = new FrameTransformerWorker(
         m_currentVideoPath, sel, type,
@@ -2738,13 +2851,13 @@ void MainWindow::startTransform(FrameTransformerWorker::TargetType type,
 
 void MainWindow::onTransformProgress(int current, int /*total*/)
 {
-    m_progressBar->setValue(current);
+    m_progressPanel->setValue(current);
 }
 
 void MainWindow::onTransformDone(bool success, QString errorMessage, QString outputPath)
 {
     m_transformBusy = false;
-    m_quickMosh->setProgressVisible(false);
+    m_progressPanel->setProgressVisible(false);
 
     if (!success) {
         statusBar()->showMessage("Transform failed: " + errorMessage);
@@ -2833,24 +2946,26 @@ void MainWindow::setActiveProject(std::unique_ptr<Project> p)
     m_project = std::move(p);
     setWindowTitle(QString("LaMoshPit \u2014 %1").arg(m_project->name()));
 
+    if (m_mbWidget) {
+        m_mbWidget->setProjectPaths(m_project->importedVideosDir(),
+                                    m_project->selectionMapsDir());
+    }
+
     // Re-root the bin on the new project's imported_videos, then load the
     // project's remembered active video if it still exists on disk.
-    if (m_mediaBin) {
-        // MediaBinWidget constructed with a fixed root; easiest is a fresh
-        // instance with the new path, swapped into the splitter.  Hold
-        // pointer to current, replace, delete old.
+    // MediaBinWidget is constructed with a fixed root, so we swap the inner
+    // widget of the dock for a fresh instance pointed at the new project.
+    if (m_mediaBin && m_mediaBinDock) {
         auto* oldBin = m_mediaBin;
-        const int idx = m_bottomSplitter->indexOf(oldBin);
         m_mediaBin = new MediaBinWidget(m_project->importedVideosDir(),
                                         m_project->thumbnailsDir(),
-                                        this);
+                                        nullptr);
         connect(m_mediaBin, &MediaBinWidget::videoSelected,
                 this, &MainWindow::onMediaBinVideoSelected);
         connect(m_mediaBin, &MediaBinWidget::importRequested,
                 this, &MainWindow::openFile);
-        m_bottomSplitter->insertWidget(idx, m_mediaBin);
+        m_mediaBinDock->setWidget(m_mediaBin);
         oldBin->deleteLater();
-        // Preserve the splitter sizes (bin is index 0, stretch 1).
     }
 
     const QString resumePath = m_project->activeVideo();
@@ -2919,6 +3034,30 @@ void MainWindow::onSaveProject()
 }
 
 // =============================================================================
+// File → Import Selection Map
+// =============================================================================
+void MainWindow::onImportSelectionMap()
+{
+    if (!m_project) {
+        QMessageBox::information(this, "Import Selection Map",
+            "Open or create a project before importing a selection map.");
+        return;
+    }
+    // No pre-selected clip when invoked from the File menu — the user
+    // picks both the map and the target clip inside the dialog.
+    ImportSelectionMapDialog dlg(m_project->importedVideosDir(),
+                                 m_project->selectionMapsDir(),
+                                 QString(), this);
+    if (dlg.exec() == QDialog::Accepted) {
+        statusBar()->showMessage(
+            "Imported selection map for: " +
+            QFileInfo(dlg.associatedClipPath()).fileName());
+        // If the map was associated with the currently-loaded clip, the
+        // MacroblockWidget's Apply Map dialog will pick it up on next open.
+    }
+}
+
+// =============================================================================
 // NLE render handler
 // =============================================================================
 //
@@ -2958,10 +3097,10 @@ void MainWindow::onNleRenderRequested(const sequencer::SequencerRenderer::Params
     worker->moveToThread(thread);
 
     m_transformBusy = true;
-    if (m_quickMosh) m_quickMosh->setProgressVisible(true);
-    if (m_progressBar) {
-        m_progressBar->setRange(0, 100);
-        m_progressBar->setValue(0);
+    if (m_progressPanel) {
+        m_progressPanel->setProgressVisible(true);
+        m_progressPanel->setRange(0, 100);
+        m_progressPanel->setValue(0);
     }
     statusBar()->showMessage("Rendering NLE sequence\u2026");
 
@@ -2969,9 +3108,9 @@ void MainWindow::onNleRenderRequested(const sequencer::SequencerRenderer::Params
             &sequencer::SequencerRenderer::run);
     connect(worker, &sequencer::SequencerRenderer::progress, this,
             [this](int cur, int total) {
-        if (total > 0 && m_progressBar) {
-            m_progressBar->setRange(0, total);
-            m_progressBar->setValue(cur);
+        if (total > 0 && m_progressPanel) {
+            m_progressPanel->setRange(0, total);
+            m_progressPanel->setValue(cur);
         }
     });
 
@@ -2982,7 +3121,7 @@ void MainWindow::onNleRenderRequested(const sequencer::SequencerRenderer::Params
             [this, importIntoProject]
             (bool success, QString errMsg, QString outPath) {
         m_transformBusy = false;
-        if (m_quickMosh) m_quickMosh->setProgressVisible(false);
+        if (m_progressPanel) m_progressPanel->setProgressVisible(false);
         if (!success) {
             statusBar()->showMessage("NLE render failed: " + errMsg);
             QMessageBox::critical(this, "Render Failed", errMsg);
@@ -3177,15 +3316,23 @@ void MainWindow::saveHacked()
 }
 
 // =============================================================================
-// eventFilter — re-docks floating preview when user closes its window.
+// eventFilter — reserved for future per-child event interception. Float/dock
+// state for every panel is now handled by QDockWidget itself.
 // =============================================================================
 bool MainWindow::eventFilter(QObject* obj, QEvent* e)
 {
-    if (obj == m_preview && e->type() == QEvent::Close && m_previewIsPopped) {
-        m_topSplitter->insertWidget(0, m_preview);
-        m_preview->show();
-        m_previewIsPopped = false;
-        return true; // suppress the close event; widget is re-docked
-    }
     return QMainWindow::eventFilter(obj, e);
+}
+
+// =============================================================================
+// closeEvent — persist the current dock layout + window geometry so the next
+// launch resumes in the same arrangement.
+// =============================================================================
+void MainWindow::closeEvent(QCloseEvent* e)
+{
+    QSettings settings("LaMoshPit", "LaMoshPit");
+    KDDockWidgets::LayoutSaver saver;
+    settings.setValue("layout/kddwLayout",   saver.serializeLayout());
+    settings.setValue("layout/lastGeometry", saveGeometry());
+    KDDockWidgets::QtWidgets::MainWindow::closeEvent(e);
 }

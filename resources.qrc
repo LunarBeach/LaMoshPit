@@ -13,5 +13,10 @@
     <file>assets/png/Buttons/Play_Button.png</file>
     <file>assets/png/Buttons/Next_Frame.png</file>
     <file>assets/png/Buttons/Loop_Button.png</file>
+    <file>assets/fonts/ethnocentric/Ethnocentric-Regular.otf</file>
+    <file>assets/fonts/creato_display/CreatoDisplay-Regular.otf</file>
+    <file>assets/fonts/creato_display/CreatoDisplay-Medium.otf</file>
+    <file>assets/fonts/creato_display/CreatoDisplay-Bold.otf</file>
+    <file>assets/fonts/Nodo.otf</file>
   </qresource>
 </RCC>

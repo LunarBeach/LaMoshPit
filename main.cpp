@@ -4,21 +4,30 @@
 #include <QPixmap>
 #include <QTimer>
 #include <QFont>
+#include <kddockwidgets/KDDockWidgets.h>
+#include <kddockwidgets/Config.h>
 #include "gui/MainWindow.h"
+#include "gui/AppFonts.h"
 
 // =============================================================================
 // Global application stylesheet — modern dark video-editor look.
 // Darker backgrounds, white/neon-green text, green accent on interactive focus.
 // Per-widget inline stylesheets in each widget file take precedence here.
+//
+// Typography roles (see gui/AppFonts.h):
+//   '%1' — body family    (CreatoDisplay-Regular) — labels, menus, inputs
+//   '%2' — heading family (Ethnocentric-Regular)  — group titles, tab labels
+//   '%3' — display family (Nodo-Regular)          — button labels everywhere
+// Call with .arg(bodyFamily, headingFamily, displayFamily).
 // =============================================================================
-static const char* kGlobalStyle = R"(
+static const char* kGlobalStyleTemplate = R"(
 
 /* ── Base ─────────────────────────────────────────────────────────────────── */
 QWidget {
     background: #0a0a0a;
     color: #ffffff;
-    font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 9pt;
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 10pt;
 }
 
 /* ── Menu bar ─────────────────────────────────────────────────────────────── */
@@ -27,6 +36,8 @@ QMenuBar {
     color: #cccccc;
     border-bottom: 1px solid #1c1c1c;
     spacing: 0;
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 10pt;
 }
 QMenuBar::item {
     padding: 5px 12px;
@@ -40,6 +51,8 @@ QMenu {
     background: #111111;
     color: #cccccc;
     border: 1px solid #272727;
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 10pt;
 }
 QMenu::item {
     padding: 5px 20px 5px 12px;
@@ -65,7 +78,8 @@ QStatusBar {
     background: #060606;
     color: #555555;
     border-top: 1px solid #181818;
-    font: 8pt 'Consolas';
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 9pt;
 }
 QStatusBar::item { border: none; }
 
@@ -122,9 +136,10 @@ QGroupBox {
     background: #0e0e0e;
     border: 1px solid #222222;
     border-radius: 5px;
-    margin-top: 10px;
-    padding-top: 4px;
-    font: bold 8pt 'Consolas';
+    margin-top: 12px;
+    padding-top: 6px;
+    font-family: '%2', '%1', sans-serif;
+    font-size: 9pt;
     color: #00ff88;
 }
 QGroupBox::title {
@@ -133,6 +148,8 @@ QGroupBox::title {
     padding: 0 5px;
     color: #00ff88;
     background: #0a0a0a;
+    font-family: '%2', '%1', sans-serif;
+    font-size: 9pt;
 }
 
 /* ── Tool tips ────────────────────────────────────────────────────────────── */
@@ -140,13 +157,35 @@ QToolTip {
     background: #151515;
     color: #cccccc;
     border: 1px solid #333333;
-    font: 8pt 'Consolas';
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 9pt;
     padding: 4px 6px;
     opacity: 230;
 }
 
 /* ── Scroll areas ─────────────────────────────────────────────────────────── */
 QScrollArea { background: #0a0a0a; border: none; }
+
+/* ── Buttons — Nodo display font for all button labels (per UI spec) ──────── */
+QPushButton {
+    font-family: '%3', '%1', sans-serif;
+    font-size: 10pt;
+}
+
+/* ── Inputs — CreatoDisplay body font, bumped up from the old 7-9pt ───────── */
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 10pt;
+}
+QComboBox QAbstractItemView {
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 10pt;
+}
+
+/* ── Labels — CreatoDisplay body font ──────────────────────────────────────── */
+QLabel {
+    font-family: '%1', 'Segoe UI', sans-serif;
+}
 
 /* ── Progress bar ─────────────────────────────────────────────────────────── */
 QProgressBar {
@@ -155,7 +194,8 @@ QProgressBar {
     border-radius: 3px;
     text-align: center;
     color: #ffffff;
-    font: 7pt 'Consolas';
+    font-family: '%1', 'Segoe UI', sans-serif;
+    font-size: 8pt;
 }
 QProgressBar::chunk {
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
@@ -173,19 +213,40 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
+    // Initialise KDDockWidgets for the Qt Widgets frontend. Must happen
+    // *before* any KDDW::MainWindow / DockWidget is constructed.
+    KDDockWidgets::initFrontend(KDDockWidgets::FrontendType::QtWidgets);
+
+    // Give every floating dock title bar a maximize/restore button and let
+    // double-clicking the title bar do the same. Lets the user fill a
+    // monitor with a popped-out panel in one click.
+    {
+        auto flags = KDDockWidgets::Config::self().flags();
+        flags |= KDDockWidgets::Config::Flag_TitleBarHasMaximizeButton;
+        flags |= KDDockWidgets::Config::Flag_DoubleClickMaximizes;
+        KDDockWidgets::Config::self().setFlags(flags);
+    }
+
+    // Load custom fonts *before* applying the stylesheet so family names
+    // referenced in the QSS resolve to the real loaded faces.
+    AppFonts::loadApplicationFonts();
+
     // Set application icon (shows in taskbar / alt-tab)
     QIcon appIcon(":/assets/ico/LA_ICO_5.ico");
     if (appIcon.isNull())
         appIcon = QIcon(":/assets/png/LA_ICO_5.png"); // PNG fallback
     app.setWindowIcon(appIcon);
 
-    // Global dark theme
-    app.setStyleSheet(kGlobalStyle);
+    // Default application font — CreatoDisplay Regular for all body UI text.
+    // Individual widgets can override via role helpers in AppFonts.h.
+    app.setFont(AppFonts::body(10));
 
-    // Default application font
-    QFont defaultFont("Consolas", 9);
-    defaultFont.setStyleHint(QFont::Monospace);
-    app.setFont(defaultFont);
+    // Global dark theme — inject resolved family names.
+    const QString styleSheet = QString(kGlobalStyleTemplate)
+        .arg(AppFonts::bodyFamily())
+        .arg(AppFonts::headingFamily())
+        .arg(AppFonts::displayFamily());
+    app.setStyleSheet(styleSheet);
 
     // ── Splash screen ────────────────────────────────────────────────────────
     QPixmap splashPx(":/assets/png/LaMoshPit_Launch_Splash.png");

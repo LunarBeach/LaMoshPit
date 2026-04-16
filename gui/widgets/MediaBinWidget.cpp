@@ -1,4 +1,5 @@
 #include "MediaBinWidget.h"
+#include "gui/AppFonts.h"
 
 #include "core/presets/VersionPathUtil.h"
 
@@ -83,22 +84,24 @@ MediaBinWidget::MediaBinWidget(const QString& importedVideosDir,
     , m_thumbnailsDir(thumbnailsDir)
 {
     setObjectName("MediaBinWidget");
-    setStyleSheet(
+    setStyleSheet(QString(
         "QWidget#MediaBinWidget { background:#121212; }"
-        "QLabel { color:#888; font:bold 8pt 'Consolas'; }"
+        "QLabel { color:#cccccc; font-family:'%1'; font-size:10pt; }"
         "QPushButton { background:#1a1a1a; color:#cccccc; border:1px solid #333; "
-                      "border-radius:3px; padding:4px 8px; font:8pt 'Consolas'; }"
+                      "border-radius:3px; padding:6px 14px; "
+                      "font-family:'%2','%1'; font-size:10pt; }"
         "QPushButton:hover { background:#242424; border-color:#555; }"
         "QTreeWidget { background:#0d0d0d; color:#cfcfcf; "
-                     "border:1px solid #2a2a2a; font:8pt 'Consolas'; }"
-        "QTreeWidget::item:selected { background:#1f3a5a; color:#ffffff; }");
+                     "border:1px solid #2a2a2a; font-family:'%1'; font-size:10pt; }"
+        "QTreeWidget::item:selected { background:#1f3a5a; color:#ffffff; }"
+    ).arg(AppFonts::bodyFamily(), AppFonts::displayFamily()));
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
 
-    auto* header = new QLabel("── MEDIA BIN", this);
-    layout->addWidget(header);
+    // Panel heading removed — the containing dock's title bar already shows
+    // "Media Bin", so an in-panel heading would duplicate it.
 
     // Button row: Import (triggers the same openFile() MainWindow uses) and
     // Refresh (rescan the folder — used after manual file-system changes).
