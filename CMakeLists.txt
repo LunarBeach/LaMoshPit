@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.28)
 project(LeeAnnesMoshPit LANGUAGES CXX)
 
+# =============================================================================
+# Two-process architecture: this file builds LaMoshPit.exe (MSVC side — MB
+# editor + Global Encode Params + MediaBin + Quick Mosh).  The NLE
+# sequencer process (LaMoshPit_NLE.exe) is built SEPARATELY from
+# nle/CMakeLists.txt using MSYS2/MinGW.  Do NOT add_subdirectory(nle)
+# here — the MSVC/MinGW C++ ABIs are incompatible and mixing them in one
+# build would produce a broken binary.  See:
+#   docs/Implementation_Plan_NLE_Rebuild_2026-04-17.md  (Step 3)
+#   docs/NLE_MSYS2_Setup.md                             (build recipe)
+# =============================================================================
+
 set(CMAKE_CXX_STANDARD 20)
 # OFF avoids "No known features" errors when CMake doesn't recognise the
 # exact MSVC version; MSVC still receives /std:c++20 via the standard variable.

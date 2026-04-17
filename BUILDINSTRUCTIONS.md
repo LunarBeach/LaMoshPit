@@ -1,6 +1,18 @@
 # LaMoshPit — Build Instructions
 
-## Environment
+LaMoshPit is a **two-process** application. Each process has its own
+build toolchain; they never share compiled code.
+
+| Process | Role | Toolchain | Section below |
+|---|---|---|---|
+| `LaMoshPit.exe` | MB editor, Global Encode Params, MediaBin, Quick Mosh | **MSVC** (Visual Studio 2022) + vcpkg | §1–§4 |
+| `LaMoshPit_NLE.exe` | NLE sequencer (MLT-based) | **MSYS2/MinGW64** | §5 |
+
+For LaMoshPit.exe you use the existing PowerShell + VS-bundled CMake
+recipe. For LaMoshPit_NLE.exe you use an MSYS2 MINGW64 shell. Never
+try to build one with the other toolchain.
+
+## §1 — Environment (LaMoshPit.exe / MSVC side)
 
 - **Platform**: Windows 11
 - **Compiler**: MSVC (Visual Studio 2022 Community)
@@ -81,3 +93,62 @@ This silently corrupts values and causes `C2022: 'NNNNN': too big for character`
 ```
 
 This matters anywhere a `\xNN` escape is immediately followed by `0-9` or `a-f`.
+
+---
+
+## §5 — Building LaMoshPit_NLE.exe (MSYS2/MinGW side)
+
+Prerequisite: MSYS2 MINGW64 with the package set installed. See
+[`docs/NLE_MSYS2_Setup.md`](docs/NLE_MSYS2_Setup.md) for the one-time
+setup. First-time install command:
+
+```bash
+# From the MSYS2 MINGW64 shell (NOT cmd / PowerShell):
+cd /c/Users/Thelu/Desktop/CodingProjects/LaMoshPit
+bash scripts/install-msys2-deps.sh
+```
+
+### Incremental build
+
+```bash
+bash scripts/build-nle-msys2.sh          # Release
+bash scripts/build-nle-msys2.sh -d       # Debug
+bash scripts/build-nle-msys2.sh --clean  # wipe nle/build/ first
+```
+
+The script sanity-checks `$MSYSTEM=MINGW64`, runs CMake configure +
+Ninja build in `nle/build/`, and emits `nle/build/LaMoshPit_NLE.exe`.
+
+### Running the NLE exe
+
+Run it from the same MINGW64 shell so Qt6 and MLT runtime DLLs are on
+PATH:
+
+```bash
+./nle/build/LaMoshPit_NLE.exe
+```
+
+Running from PowerShell or double-clicking the exe will fail with
+"Qt6Core.dll not found" until Phase 1 Step 12 adds the deploy step.
+
+### The two builds are fully isolated
+
+- `LaMoshPit.exe`'s build tree lives in `build/` (MSVC).
+- `LaMoshPit_NLE.exe`'s build tree lives in `nle/build/` (MinGW).
+- No CMake target from either side can be linked from the other.
+- The MB editor's vcpkg overlay (with the 6 bitstream-surgery hooks) is
+  **only** consumed by the MSVC build. The NLE never sees it. The
+  two FFmpeg copies coexist on disk; Windows DLL search is scoped
+  per-exe so they can't collide at runtime.
+
+### Known gotchas
+
+- **Wrong MSYS2 shell.** Use `MSYS2 MINGW64` (green prompt). Using
+  plain `MSYS2 MSYS` links against `msys-2.0.dll`, not what we want.
+- **Qt6 DLL not found when double-clicking the exe.** Expected until
+  Step 12. Run from the MINGW64 shell.
+- **`cmake: command not found` from MINGW64.** `pacman -S mingw-w64-x86_64-cmake`.
+  The install script should have handled this.
+- **MLT modules not found at runtime.** Set `MLT_REPOSITORY=/mingw64/lib/mlt-7`
+  explicitly if MLT::Factory::init() logs a warning. Should work out
+  of the box from MINGW64 where the env is already correct.
