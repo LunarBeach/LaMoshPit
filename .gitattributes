@@ -1,0 +1,7 @@
+# Shell scripts must always use LF line endings — bash treats CRLF as a
+# syntax error on some MSYS2 configurations.
+*.sh text eol=lf
+
+# Default: let git auto-detect text files and normalise to LF in the
+# repo, with per-OS checkout conversion (CRLF on Windows, LF on Linux).
+* text=auto
