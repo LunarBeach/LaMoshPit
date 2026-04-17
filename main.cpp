@@ -2,7 +2,6 @@
 #include <QIcon>
 #include <QSplashScreen>
 #include <QPixmap>
-#include <QTimer>
 #include <QFont>
 #include <kddockwidgets/KDDockWidgets.h>
 #include <kddockwidgets/Config.h>
