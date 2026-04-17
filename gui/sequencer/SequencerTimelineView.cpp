@@ -5,6 +5,7 @@
 #include "core/sequencer/SequencerProject.h"
 #include "core/sequencer/SequencerTrack.h"
 #include "core/sequencer/SequencerPlaybackClock.h"
+#include "core/sequencer/ClipEffects.h"
 #include "core/sequencer/EditCommand.h"
 
 extern "C" {
@@ -81,6 +82,10 @@ void SequencerTimelineView::refreshSceneExtent()
         : tickToSceneX(secondsToTicks(10));
 
     const int numTracks = m_project ? m_project->trackCount() : 0;
+    // Push the track count so the flipped-Y mapping in trackTopY /
+    // trackIndexAtY sees the right value this frame.
+    timelineTrackCountRef() = std::max(numTracks, 1);
+
     const double height = kRulerHeight
                         + std::max(numTracks, 1)
                             * (kTrackHeight + kTrackGap) + kTrackGap;
@@ -125,6 +130,29 @@ void SequencerTimelineView::rebuildClipItems()
             m_scene->addItem(item);
             m_clipItems.append(item);
         }
+    }
+
+    // Re-apply the canonical selection after rebuild so the Clip Properties
+    // panel stays in sync through project edits (e.g. ChangeClipPropertyCmd
+    // emits projectChanged → rebuild, but the user's selection is still
+    // conceptually the same clip).  If the index is now out of range (the
+    // selected clip was removed), fall back to "no selection".
+    if (m_selectedTrackIdx >= 0 && m_selectedClipIdx >= 0
+        && m_selectedTrackIdx < m_project->trackCount()
+        && m_selectedClipIdx < m_project->track(m_selectedTrackIdx).clips.size())
+    {
+        for (auto* ci : m_clipItems) {
+            if (ci && ci->trackIndex() == m_selectedTrackIdx
+                   && ci->clipIndex()  == m_selectedClipIdx) {
+                ci->setSelected(true);
+                break;
+            }
+        }
+        emit selectedClipChanged(m_selectedTrackIdx, m_selectedClipIdx);
+    } else if (m_selectedTrackIdx != -1 || m_selectedClipIdx != -1) {
+        m_selectedTrackIdx = -1;
+        m_selectedClipIdx  = -1;
+        emit selectedClipChanged(-1, -1);
     }
 }
 
@@ -213,7 +241,9 @@ void SequencerTimelineView::onTickAdvanced(Tick tick)
 void SequencerTimelineView::clipItemPressed(SequencerClipItem* item)
 {
     if (!item) return;
-    emit selectedClipChanged(item->trackIndex(), item->clipIndex());
+    m_selectedTrackIdx = item->trackIndex();
+    m_selectedClipIdx  = item->clipIndex();
+    emit selectedClipChanged(m_selectedTrackIdx, m_selectedClipIdx);
 }
 
 void SequencerTimelineView::clipItemDragged(SequencerClipItem* item,
@@ -359,7 +389,11 @@ void SequencerTimelineView::seekToSceneX(double x)
 
 void SequencerTimelineView::dragEnterEvent(QDragEnterEvent* e)
 {
-    if (e->mimeData()->hasUrls()) { e->acceptProposedAction(); return; }
+    if (e->mimeData()->hasUrls()
+        || e->mimeData()->hasFormat(QString::fromLatin1(kClipEffectMimeType))) {
+        e->acceptProposedAction();
+        return;
+    }
     QGraphicsView::dragEnterEvent(e);
 }
 
@@ -372,12 +406,55 @@ void SequencerTimelineView::dragMoveEvent(QDragMoveEvent* e)
         e->acceptProposedAction();
         return;
     }
+    if (e->mimeData()->hasFormat(QString::fromLatin1(kClipEffectMimeType))) {
+        // Effects drop onto a specific clip; the visual hover highlight for
+        // URL drops tracks track rows, which would be misleading here, so
+        // just accept the drag without updating m_dropHoverTrack.
+        e->acceptProposedAction();
+        return;
+    }
     QGraphicsView::dragMoveEvent(e);
 }
 
 void SequencerTimelineView::dropEvent(QDropEvent* e)
 {
-    if (!e->mimeData()->hasUrls() || !m_project) { e->ignore(); return; }
+    if (!m_project) { e->ignore(); return; }
+
+    // ── Effect drop (from the Effects Rack) ──────────────────────────────
+    // Find the clip whose timeline range contains the drop point and tail-
+    // append the effect to its list.  Dropping on empty timeline space is a
+    // no-op — silently ignored (no snackbar etc.; consistent with the rest
+    // of the sequencer's drop UX).
+    if (e->mimeData()->hasFormat(QString::fromLatin1(kClipEffectMimeType))) {
+        const QByteArray payload = e->mimeData()->data(
+            QString::fromLatin1(kClipEffectMimeType));
+        const auto maybeEffect = clipEffectFromId(QString::fromUtf8(payload));
+        if (!maybeEffect) { e->ignore(); return; }
+
+        const QPointF scenePos = mapToScene(e->position().toPoint());
+        const int trackIdx = trackIndexAtY(scenePos.y(), m_project->trackCount());
+        if (trackIdx < 0) { e->ignore(); return; }
+
+        const Tick tickAtDrop = sceneXToTick(scenePos.x());
+        const auto& track = m_project->track(trackIdx);
+        int targetClipIdx = -1;
+        for (int i = 0; i < track.clips.size(); ++i) {
+            if (track.clips[i].containsTimelineTick(tickAtDrop)) {
+                targetClipIdx = i;
+                break;
+            }
+        }
+        if (targetClipIdx < 0) { e->ignore(); return; }
+
+        QVector<ClipEffect> next = track.clips[targetClipIdx].effects;
+        next.append(*maybeEffect);
+        m_project->executeCommand(std::make_unique<ChangeClipEffectsCmd>(
+            trackIdx, targetClipIdx, std::move(next)));
+        e->acceptProposedAction();
+        return;
+    }
+
+    if (!e->mimeData()->hasUrls()) { e->ignore(); return; }
 
     const QPointF scenePos = mapToScene(e->position().toPoint());
     int trackIdx = trackIndexAtY(scenePos.y(),
@@ -461,6 +538,11 @@ void SequencerTimelineView::mousePressEvent(QMouseEvent* e)
     QGraphicsView::mousePressEvent(e);
     if (!e->isAccepted()) {
         for (auto* ci : m_clipItems) if (ci) ci->setSelected(false);
+        m_selectedTrackIdx = -1;
+        m_selectedClipIdx  = -1;
+        // Notify listeners (e.g. the Clip Properties panel) that nothing
+        // is selected now.  (-1, -1) is the "no selection" sentinel.
+        emit selectedClipChanged(-1, -1);
     }
 }
 

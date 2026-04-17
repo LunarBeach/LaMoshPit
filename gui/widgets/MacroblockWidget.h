@@ -57,7 +57,7 @@ public:
     // current clip's selection-map sidecar and to open the Import Map dialog
     // with the right project paths.  Call this before/after every project
     // switch; call with empty strings when no project is active.
-    void setProjectPaths(const QString& importedVideosDir,
+    void setProjectPaths(const QString& moshVideoFolder,
                          const QString& selectionMapsDir);
 
     // Re-read the user's chosen MB-selection overlay colour from app
@@ -110,6 +110,14 @@ signals:
 
     // Emitted whenever the painted MB selection changes (for spatial mask sync).
     void mbSelectionChanged(const QSet<int>& sel);
+
+    // Scope C — fired whenever a user-initiated mutation of m_edits occurs
+    // (knob turn, cascade slider, canvas selection, button-action slot).
+    // Does NOT fire from loadEditMap / setVideo / reload (those are
+    // programmatic paths used by undo commands and video loading).
+    // MainWindow listens, debounces via QTimer, diffs, and creates an
+    // MBEditMapReplaceCommand for the unified undo stack.
+    void editCommitted();
 
     // Pop-out button inside the canvas nav bar was clicked. MainWindow
     // toggles the canvas dock's floating state in response. Kept as a
@@ -268,7 +276,7 @@ private:
     QSet<int>    m_selectionClipboard;
 
     // ── Project paths (for selection-map import / apply) ─────────────────
-    QString      m_projectImportedVideosDir;
+    QString      m_projectMoshVideoFolder;
     QString      m_projectMapsDir;
 
     // ── Nav / brush wrapper widgets (live inside m_canvasPanel) ──────────

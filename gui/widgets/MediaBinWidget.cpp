@@ -76,11 +76,11 @@ QString prettyBytes(qint64 b)
 
 // =============================================================================
 
-MediaBinWidget::MediaBinWidget(const QString& importedVideosDir,
+MediaBinWidget::MediaBinWidget(const QString& moshVideoFolder,
                                const QString& thumbnailsDir,
                                QWidget* parent)
     : QWidget(parent)
-    , m_importedVideosDir(importedVideosDir)
+    , m_moshVideoFolder(moshVideoFolder)
     , m_thumbnailsDir(thumbnailsDir)
 {
     setObjectName("MediaBinWidget");
@@ -110,7 +110,7 @@ MediaBinWidget::MediaBinWidget(const QString& importedVideosDir,
     m_btnImport  = new QPushButton("Import\u2026", this);
     m_btnRefresh = new QPushButton("Refresh",    this);
     m_btnImport->setToolTip("Import a new video (same as File \u2192 Open)");
-    m_btnRefresh->setToolTip("Rescan the imported_videos folder");
+    m_btnRefresh->setToolTip("Rescan the MoshVideoFolder");
     btnRow->addWidget(m_btnImport);
     btnRow->addWidget(m_btnRefresh);
     btnRow->addStretch(1);
@@ -155,10 +155,10 @@ void MediaBinWidget::refresh()
 {
     m_tree->clear();
 
-    const QDir dir(m_importedVideosDir);
+    const QDir dir(m_moshVideoFolder);
     if (!dir.exists()) {
         auto* placeholder = new QTreeWidgetItem(m_tree);
-        placeholder->setText(0, "(imported_videos folder not found)");
+        placeholder->setText(0, "(MoshVideoFolder not found)");
         placeholder->setFlags(Qt::NoItemFlags);
         return;
     }

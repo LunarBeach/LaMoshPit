@@ -291,4 +291,70 @@ void SplitClipCmd::undo(SequencerProject& project) {
     track.repackContiguous();
 }
 
+// ── ChangeClipPropertyCmd ───────────────────────────────────────────────────
+ChangeClipPropertyCmd::ChangeClipPropertyCmd(int trackIndex, int clipIndex,
+                                             float newOpacity, BlendMode newBlend,
+                                             Tick newFadeIn, Tick newFadeOut)
+    : m_trackIndex(trackIndex)
+    , m_clipIndex(clipIndex)
+    , m_newOpacity(newOpacity)
+    , m_newBlend(newBlend)
+    , m_newFadeIn(newFadeIn)
+    , m_newFadeOut(newFadeOut)
+{}
+
+bool ChangeClipPropertyCmd::redo(SequencerProject& project) {
+    if (m_trackIndex < 0 || m_trackIndex >= project.trackCount()) return false;
+    auto& track = project.trackMutable(m_trackIndex);
+    if (m_clipIndex < 0 || m_clipIndex >= track.clips.size()) return false;
+    auto& clip = track.clips[m_clipIndex];
+    // Snapshot old values on first redo so undo/redo round-trips are exact.
+    m_oldOpacity = clip.opacity;
+    m_oldBlend   = clip.blendMode;
+    m_oldFadeIn  = clip.fadeInTicks;
+    m_oldFadeOut = clip.fadeOutTicks;
+    clip.opacity      = m_newOpacity;
+    clip.blendMode    = m_newBlend;
+    clip.fadeInTicks  = m_newFadeIn;
+    clip.fadeOutTicks = m_newFadeOut;
+    return true;
+}
+
+void ChangeClipPropertyCmd::undo(SequencerProject& project) {
+    if (m_trackIndex < 0 || m_trackIndex >= project.trackCount()) return;
+    auto& track = project.trackMutable(m_trackIndex);
+    if (m_clipIndex < 0 || m_clipIndex >= track.clips.size()) return;
+    auto& clip = track.clips[m_clipIndex];
+    clip.opacity      = m_oldOpacity;
+    clip.blendMode    = m_oldBlend;
+    clip.fadeInTicks  = m_oldFadeIn;
+    clip.fadeOutTicks = m_oldFadeOut;
+}
+
+// ── ChangeClipEffectsCmd ─────────────────────────────────────────────────────
+
+ChangeClipEffectsCmd::ChangeClipEffectsCmd(int trackIndex, int clipIndex,
+                                           QVector<ClipEffect> newEffects)
+    : m_trackIndex(trackIndex)
+    , m_clipIndex(clipIndex)
+    , m_new(std::move(newEffects))
+{}
+
+bool ChangeClipEffectsCmd::redo(SequencerProject& project) {
+    if (m_trackIndex < 0 || m_trackIndex >= project.trackCount()) return false;
+    auto& track = project.trackMutable(m_trackIndex);
+    if (m_clipIndex < 0 || m_clipIndex >= track.clips.size()) return false;
+    auto& clip = track.clips[m_clipIndex];
+    m_old = clip.effects;
+    clip.effects = m_new;
+    return true;
+}
+
+void ChangeClipEffectsCmd::undo(SequencerProject& project) {
+    if (m_trackIndex < 0 || m_trackIndex >= project.trackCount()) return;
+    auto& track = project.trackMutable(m_trackIndex);
+    if (m_clipIndex < 0 || m_clipIndex >= track.clips.size()) return;
+    track.clips[m_clipIndex].effects = m_old;
+}
+
 } // namespace sequencer

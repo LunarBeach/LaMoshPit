@@ -27,6 +27,7 @@
 #include <QObject>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <atomic>
 
 namespace sequencer {
 
@@ -58,8 +59,11 @@ public:
     // tickAdvanced() once with the new value so listeners re-sync.
     void seek(Tick tick);
 
-    bool isPlaying() const { return m_playing; }
-    Tick currentTick() const { return m_currentTick; }
+    // Both getters are safe to call from any thread — underlying storage
+    // is atomic so the worker-thread FrameRouter can read them without
+    // coordinating with the GUI thread that drives writes.
+    bool isPlaying() const { return m_playing.load(std::memory_order_acquire); }
+    Tick currentTick() const { return m_currentTick.load(std::memory_order_acquire); }
 
 signals:
     // Emitted each time the master tick advances (or wraps).  Listeners
@@ -82,12 +86,18 @@ private:
     AVRational    m_fps         { 30, 1 };
     Tick          m_tickPerFrame{ 0 };
 
-    Tick m_currentTick { 0 };
+    // Atomic: read from the worker-thread FrameRouter; written from the
+    // GUI thread (play/pause/seek/stop and onTimerTick).  Using acquire/
+    // release pairing on the getters is sufficient — there's no critical
+    // section involving multiple fields that must update atomically
+    // together.
+    std::atomic<Tick> m_currentTick { 0 };
+    std::atomic<bool> m_playing     { false };
+
     Tick m_loopIn      { 0 };
     Tick m_loopOut     { 0 };
     Tick m_endTicks    { 0 };
     bool m_loopEnabled { false };
-    bool m_playing     { false };
 };
 
 } // namespace sequencer

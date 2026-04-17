@@ -1,17 +1,30 @@
 #pragma once
 
 // =============================================================================
-// SequencerRenderer — bakes one SequencerProject track to a clean H.264 MP4.
+// SequencerRenderer — bakes the full sequencer project (all enabled tracks,
+// composited bottom-up per clip.opacity / blendMode / fadeIn / fadeOut) to
+// a clean H.264 MP4.
 //
 // Runs on a worker QThread (MainWindow spawns + owns the thread).  Emits
 // progress() every few frames and done() once at the end.  Never touches
 // Qt GUI objects directly.
 //
-// Decode path: reuses SequencerClipDecoder, which handles D3D11VA HW
-// decode with SW fallback.  Each clip in the chosen track is walked in
-// sequence.  The decoded BGRA frame is swscale-converted to YUV420P (or
-// NV12 for HW encoders), stamped with an output-timebase PTS, and handed
-// to the encoder.
+// Layer compositor: for each output frame tick, walks every enabled track
+// in ascending index order (index 0 at the bottom of the stack), asks the
+// track for the clip at this tick, pulls the decoded frame from that clip,
+// and composites it onto the running BGRA accumulator using the clip's
+// effective opacity (opacity * fadeEnvelope(t)) and blend mode.  Starts
+// each frame from black; tracks with no clip at the current tick skip.
+//
+// Decode path: reuses SequencerClipDecoder, one per track kept warm across
+// output frames and re-opened when a track's clip changes.  Same D3D11VA
+// HW path with SW fallback as before.  The composited BGRA accumulator is
+// swscale-converted to YUV420P (or NV12 for HW encoders), stamped with an
+// output-timebase PTS, and handed to the encoder.
+//
+// sourceTrackIndex is retained only as a "resolution reference" — the
+// first clip of that track (or of any non-empty track as fallback) sets
+// outW/outH.  All enabled tracks' clips are rendered regardless.
 //
 // Encoder:
 //   - Libx264Default      → libx264 with CRF 18 + sensible defaults.

@@ -4,7 +4,28 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
+#include <QDebug>
+#include <QElapsedTimer>
 #include <algorithm>
+
+// Flip to 1 to turn on the [clk] / [rtr] tick log stream on qDebug().
+// Currently on for the playhead-jerks-back investigation; revert to 0
+// once the pacing bug is fixed.
+#define LAMOSH_TICK_DEBUG_LOG 1
+
+// Monotonic wall-time source used to stamp every log line so we can
+// correlate events in the log by real elapsed milliseconds.  Lives at
+// file scope so both the clock and the router can reference it.
+namespace sequencer {
+namespace {
+QElapsedTimer& tickLogWall() {
+    static QElapsedTimer t;
+    if (!t.isValid()) t.start();
+    return t;
+}
+} // namespace
+qint64 tickLogWallMs() { return tickLogWall().elapsed(); }
+} // namespace sequencer
 
 namespace sequencer {
 
@@ -49,8 +70,12 @@ void SequencerPlaybackClock::setEndTicks(Tick endTicks)
 
 void SequencerPlaybackClock::play()
 {
-    if (m_playing) return;
-    m_playing = true;
+    if (m_playing.load(std::memory_order_acquire)) return;
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[clk]" << tickLogWallMs() << "ms play from="
+             << m_currentTick.load();
+#endif
+    m_playing.store(true, std::memory_order_release);
     m_wall.start();
     m_lastWallNs = m_wall.nsecsElapsed();
     m_timer.start();
@@ -58,23 +83,36 @@ void SequencerPlaybackClock::play()
 
 void SequencerPlaybackClock::pause()
 {
-    if (!m_playing) return;
-    m_playing = false;
+    if (!m_playing.load(std::memory_order_acquire)) return;
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[clk]" << tickLogWallMs() << "ms pause at="
+             << m_currentTick.load();
+#endif
+    m_playing.store(false, std::memory_order_release);
     m_timer.stop();
 }
 
 void SequencerPlaybackClock::stop()
 {
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[clk]" << tickLogWallMs() << "ms stop from="
+             << m_currentTick.load();
+#endif
     pause();
-    m_currentTick = 0;
-    emit tickAdvanced(m_currentTick);
+    m_currentTick.store(0, std::memory_order_release);
+    emit tickAdvanced(0);
 }
 
 void SequencerPlaybackClock::seek(Tick tick)
 {
-    m_currentTick = std::max<Tick>(0, tick);
-    m_lastWallNs  = m_wall.isValid() ? m_wall.nsecsElapsed() : 0;
-    emit tickAdvanced(m_currentTick);
+    const Tick clamped = std::max<Tick>(0, tick);
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[clk]" << tickLogWallMs() << "ms seek from="
+             << m_currentTick.load() << "to=" << clamped;
+#endif
+    m_currentTick.store(clamped, std::memory_order_release);
+    m_lastWallNs = m_wall.isValid() ? m_wall.nsecsElapsed() : 0;
+    emit tickAdvanced(clamped);
 }
 
 Tick SequencerPlaybackClock::computeTickDelta()
@@ -92,12 +130,17 @@ Tick SequencerPlaybackClock::computeTickDelta()
 
 void SequencerPlaybackClock::onTimerTick()
 {
-    if (!m_playing) return;
+    if (!m_playing.load(std::memory_order_acquire)) return;
 
+    const Tick prev  = m_currentTick.load(std::memory_order_acquire);
     const Tick delta = computeTickDelta();
     if (delta <= 0) return;
 
-    Tick next = m_currentTick + delta;
+    Tick next = prev + delta;
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[clk]" << tickLogWallMs() << "ms timer prev=" << prev
+             << "delta=" << delta << "next=" << next;
+#endif
 
     // Loop-mode wrap.  If the new tick has crossed loopOut, wrap back to
     // loopIn plus the overshoot.  Use a while loop in case the delta is
@@ -111,15 +154,15 @@ void SequencerPlaybackClock::onTimerTick()
         }
     } else if (m_endTicks > 0 && next >= m_endTicks) {
         // Non-loop: pin to end, stop, emit signal.
-        m_currentTick = m_endTicks;
+        m_currentTick.store(m_endTicks, std::memory_order_release);
         pause();
-        emit tickAdvanced(m_currentTick);
+        emit tickAdvanced(m_endTicks);
         emit reachedEnd();
         return;
     }
 
-    m_currentTick = next;
-    emit tickAdvanced(m_currentTick);
+    m_currentTick.store(next, std::memory_order_release);
+    emit tickAdvanced(next);
 }
 
 } // namespace sequencer

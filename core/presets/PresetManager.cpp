@@ -124,7 +124,7 @@ FrameMBParams PresetManager::jsonToMB(const QJsonObject& o)
     return p;
 }
 
-// ── JSON: GlobalEncodeParams (no spatialMaskMBs) ──────────────────────────────
+// ── JSON: GlobalEncodeParams ──────────────────────────────────────────────────
 
 QJsonObject PresetManager::gpToJson(const GlobalEncodeParams& p)
 {
@@ -165,7 +165,6 @@ QJsonObject PresetManager::gpToJson(const GlobalEncodeParams& p)
     o["killIFrames"]   = p.killIFrames;
     o["scenecut"]      = p.scenecut;
     o["rcLookahead"]   = p.rcLookahead;
-    o["spatialMaskQP"] = p.spatialMaskQP;
     // Rate-control fidelity
     o["qcompEnabled"]          = p.qcompEnabled;
     o["qcomp"]                 = (double)p.qcomp;
@@ -220,7 +219,6 @@ GlobalEncodeParams PresetManager::jsonToGP(const QJsonObject& o)
     p.killIFrames   = o["killIFrames"].toBool(false);
     p.scenecut      = o["scenecut"].toBool(false);
     p.rcLookahead   = o["rcLookahead"].toInt(-1);
-    p.spatialMaskQP = o["spatialMaskQP"].toInt(51);
     // Rate-control fidelity
     p.qcompEnabled          = o["qcompEnabled"].toBool(false);
     p.qcomp                 = (float)o["qcomp"].toDouble(0.6);

@@ -9,10 +9,10 @@
 // LaMoshPit stores each render iteration as a new file alongside the original
 // import, rather than overwriting in place.  The convention:
 //
-//   imported_videos/foo_imported.mp4          ← the root (original import)
-//   imported_videos/foo_imported.v01.mp4      ← render 1
-//   imported_videos/foo_imported.v02.mp4      ← render 2
-//   imported_videos/foo_imported.v03.mp4      ← render 3 ...
+//   MoshVideoFolder/foo_imported.mp4          ← the root (original import)
+//   MoshVideoFolder/foo_imported.v01.mp4      ← render 1
+//   MoshVideoFolder/foo_imported.v02.mp4      ← render 2
+//   MoshVideoFolder/foo_imported.v03.mp4      ← render 3 ...
 //
 // A sidecar JSON capturing the knob state that produced each iteration lives
 // alongside the video: foo_imported.v01.mp4.json.

@@ -166,6 +166,8 @@ add_executable(LeeAnnesMoshPit WIN32
     core/util/VideoMetaProbe.cpp
     core/util/MapFrameSampler.cpp
     core/util/SelectionMorphology.cpp
+    gui/undo/UndoController.cpp
+    gui/undo/EditorCommands.cpp
     gui/sequencer/SequencerPreviewPlayer.cpp
     gui/sequencer/SequencerDock.cpp
     gui/sequencer/SequencerClipItem.cpp
@@ -174,6 +176,7 @@ add_executable(LeeAnnesMoshPit WIN32
     gui/sequencer/SequencerTimelineView.cpp
     gui/sequencer/SequencerTrackHeader.cpp
     gui/sequencer/SequencerTransitionPanel.cpp
+    gui/sequencer/SequencerClipPropertiesPanel.cpp
     gui/sequencer/SequencerRenderDialog.cpp
     core/pipeline/DecodePipeline.cpp
     core/transform/FrameTransformer.cpp
@@ -188,6 +191,8 @@ add_executable(LeeAnnesMoshPit WIN32
     core/sequencer/SequencerPlaybackClock.cpp
     core/sequencer/TrackPlaybackChain.cpp
     core/sequencer/Transition.cpp
+    core/sequencer/BlendModes.cpp
+    core/sequencer/ClipEffects.cpp
     core/sequencer/FrameRouter.cpp
     core/sequencer/SpoutSender.cpp
     core/sequencer/SequencerRenderer.cpp

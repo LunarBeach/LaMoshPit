@@ -160,7 +160,14 @@ void SequencerTrackHeader::rebuildRows()
     }
     if (!m_project) return;
 
-    for (int i = 0; i < m_project->trackCount(); ++i) {
+    // Iterate in reverse so the highest-index track (topmost compositor
+    // layer) appears at the visual top of the header column — matching the
+    // flipped-Y layout in the timeline view.  Track 0 (bottom of the layer
+    // stack) ends up at the bottom, mirroring the "look down at the stack"
+    // NLE convention.
+    const int n = m_project->trackCount();
+    timelineTrackCountRef() = std::max(n, 1);
+    for (int i = n - 1; i >= 0; --i) {
         const auto& tr = m_project->track(i);
         auto* row = new TrackRowWidget(i, tr.name, i == m_activeTrack, m_rowsHost);
         row->setSelectedCallback([this](int trackIdx) {

@@ -3,7 +3,12 @@
 #include "core/sequencer/SequencerTrack.h"
 #include "core/sequencer/SequencerClip.h"
 #include "core/sequencer/SequencerClipDecoder.h"
+#include "core/sequencer/BlendModes.h"
+#include "core/sequencer/ClipEffects.h"
 #include "core/util/HwEncoder.h"
+
+#include <memory>
+#include <vector>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -98,42 +103,70 @@ void SequencerRenderer::run()
         emit done(false, "No project", m_params.outputPath);
         return;
     }
-    if (m_params.sourceTrackIndex < 0
-        || m_params.sourceTrackIndex >= m_project->trackCount()) {
-        emit done(false, "Track index out of range", m_params.outputPath);
-        return;
-    }
-    const auto& track = m_project->track(m_params.sourceTrackIndex);
-    if (track.clips.isEmpty()) {
-        emit done(false, "Chosen track is empty", m_params.outputPath);
+    const int nTracks = m_project->trackCount();
+    if (nTracks <= 0) {
+        emit done(false, "Project has no tracks", m_params.outputPath);
         return;
     }
 
-    // Resolve the actual render range.
-    const Tick totalTrack = track.totalDurationTicks();
+    // Helper: find the "resolution reference" clip — prefer the first clip
+    // of sourceTrackIndex, else the first clip of any enabled non-empty
+    // track.  Resolution locks to this clip's native frame size.
+    const SequencerClip* resRef = nullptr;
+    if (m_params.sourceTrackIndex >= 0 && m_params.sourceTrackIndex < nTracks) {
+        const auto& t = m_project->track(m_params.sourceTrackIndex);
+        if (!t.clips.isEmpty()) resRef = &t.clips.first();
+    }
+    if (!resRef) {
+        for (int t = 0; t < nTracks; ++t) {
+            const auto& tr = m_project->track(t);
+            if (!tr.enabled) continue;
+            if (tr.clips.isEmpty()) continue;
+            resRef = &tr.clips.first();
+            break;
+        }
+    }
+    if (!resRef) {
+        emit done(false, "All tracks are empty or disabled",
+                  m_params.outputPath);
+        return;
+    }
+
+    // Project duration across ALL tracks — the layer compositor renders
+    // every enabled track regardless of sourceTrackIndex, so the render
+    // window defaults to the longest track in the project.
+    Tick projectDuration = 0;
+    for (int t = 0; t < nTracks; ++t) {
+        projectDuration = std::max(projectDuration,
+                                    m_project->track(t).totalDurationTicks());
+    }
+
     Tick rStart = std::max<Tick>(0, m_params.rangeStartTicks);
     Tick rEnd   = (m_params.rangeEndTicks > 0)
-                  ? std::min<Tick>(m_params.rangeEndTicks, totalTrack)
-                  : totalTrack;
+                  ? std::min<Tick>(m_params.rangeEndTicks, projectDuration)
+                  : projectDuration;
     if (rEnd <= rStart) {
         emit done(false, "Empty render range", m_params.outputPath);
         return;
     }
 
-    // Frame dimensions — taken from the FIRST clip's source so we have
-    // something concrete to lock to.  Mid-sequence resolution changes
-    // are handled by swscale rescaling every frame to these dims.
+    // Frame dimensions — probe the resolution-reference clip.  Mid-sequence
+    // resolution changes (other tracks with different native dims) are
+    // handled by swscale rescaling every frame to these dims inside the
+    // per-track decode path.
     int outW = 0, outH = 0;
     {
         SequencerClipDecoder probe;
-        if (!probe.open(track.clips.first())) {
-            emit done(false, "Could not probe first clip: " + probe.lastError(),
-                      m_params.outputPath);
+        if (!probe.open(*resRef)) {
+            emit done(false,
+                "Could not probe resolution-reference clip: " + probe.lastError(),
+                m_params.outputPath);
             return;
         }
         QImage firstImg; Tick firstTick = 0;
         if (!probe.pullFrame(firstImg, firstTick, true) || firstImg.isNull()) {
-            emit done(false, "Could not decode first clip", m_params.outputPath);
+            emit done(false, "Could not decode resolution-reference clip",
+                      m_params.outputPath);
             return;
         }
         outW = firstImg.width();
@@ -299,64 +332,155 @@ void SequencerRenderer::run()
         (void)flushing;
     };
 
-    // Walk every clip that has any overlap with the render range.
-    for (int ci = 0; ci < track.clips.size() && !aborted; ++ci) {
-        const auto& clip = track.clips[ci];
-        const Tick clipStart = clip.timelineStartTicks;
-        const Tick clipEnd   = clip.timelineEndTicks();
-        if (clipEnd <= rStart) continue;    // wholly before range
-        if (clipStart >= rEnd) break;       // wholly after range — track is ordered
+    // ── Layer compositor ─────────────────────────────────────────────────
+    // One decoder per track, kept warm across output frames.  When a track's
+    // current clip index changes (clip ended, next one starts), the decoder
+    // is re-opened against the new clip.  When a track has no clip at the
+    // current output tick, the decoder is left alone — we don't tear it
+    // down, the next time a clip comes in the switch path re-opens it.
+    struct TrackState {
+        std::unique_ptr<SequencerClipDecoder> dec;
+        int   currentClipIdx { -1 };
+        QImage cachedFrame;          // most-recently-pulled BGRA frame
+        Tick  cachedTick     { -1 };
+        bool  eof            { false };
+    };
+    std::vector<TrackState> trackStates(nTracks);
+    for (auto& ts : trackStates) {
+        ts.dec = std::make_unique<SequencerClipDecoder>();
+    }
 
-        SequencerClipDecoder dec;
-        if (!dec.open(clip)) {
-            qWarning() << "[Renderer] open clip failed:" << dec.lastError();
-            continue;   // skip this clip; don't abort the whole render
+    const Tick tickStep = frameDurationTicks(fpsRat);
+    if (tickStep <= 0) {
+        aborted = true;
+        abortMsg = "Invalid output frame rate";
+    }
+
+    // Accumulator — one BGRA image reused per output frame, cleared to
+    // black between frames.  Allocating inside the loop would churn ~MB
+    // per frame on larger clips.
+    QImage accum(outW, outH, QImage::Format_ARGB32);
+
+    // Count total output frames for progress.  Use integer math so a
+    // range of exactly N*tickStep produces exactly N frames.
+    const int64_t estFrames =
+        (tickStep > 0) ? int64_t((rEnd - rStart + tickStep - 1) / tickStep) : 0;
+
+    for (int64_t frameIdx = 0; frameIdx < estFrames && !aborted; ++frameIdx) {
+        const Tick outTick = rStart + frameIdx * tickStep;
+        accum.fill(Qt::black);
+
+        // Composite every enabled track onto the accumulator, bottom-up.
+        for (int ti = 0; ti < nTracks && !aborted; ++ti) {
+            const auto& track = m_project->track(ti);
+            if (!track.enabled) continue;
+
+            const int clipIdx = track.clipIndexAtTick(outTick);
+            if (clipIdx < 0) {
+                // No clip at this tick on this track — track shows nothing.
+                trackStates[ti].currentClipIdx = -1;
+                continue;
+            }
+            const auto& clip = track.clips[clipIdx];
+            auto& ts = trackStates[ti];
+
+            // Clip change — open + seek the decoder to this output tick.
+            if (ts.currentClipIdx != clipIdx) {
+                if (!ts.dec->open(clip)) {
+                    qWarning() << "[Renderer] open clip failed on track"
+                               << ti << ":" << ts.dec->lastError();
+                    ts.currentClipIdx = -1;
+                    continue;
+                }
+                ts.currentClipIdx = clipIdx;
+                ts.cachedFrame = QImage();
+                ts.cachedTick  = -1;
+                ts.eof         = false;
+                ts.dec->seekToMasterTick(outTick);
+            }
+
+            // Pull frames until the decoder's cursor reaches or passes the
+            // output tick.  pullFrame returns false on EOF — stay silent
+            // and keep whatever was last cached (avoids visible flicker at
+            // clip tails where decoder EOF is off-by-one vs. timeline).
+            while (!ts.eof && ts.cachedTick < outTick) {
+                QImage img; Tick gotTick = 0;
+                if (!ts.dec->pullFrame(img, gotTick, true)) {
+                    ts.eof = true;
+                    break;
+                }
+                ts.cachedFrame = std::move(img);
+                ts.cachedTick  = gotTick;
+            }
+
+            if (ts.cachedFrame.isNull()) continue;
+
+            // Composite onto accumulator using the clip's effective
+            // opacity (base opacity * fade envelope) and blend mode.
+            const float alpha = clip.effectiveOpacity(outTick);
+            if (alpha <= 0.0f) continue;
+
+            // Rescale cachedFrame to output dimensions if it differs — we
+            // keep swscale for that path inside a lightweight helper.
+            // Today SequencerClipDecoder returns frames at source size;
+            // the accumulator is at outW x outH, so mismatched sources
+            // need a per-composite rescale.
+            const QImage* layer = &ts.cachedFrame;
+            QImage rescaled;
+            if (ts.cachedFrame.width() != outW ||
+                ts.cachedFrame.height() != outH) {
+                rescaled = ts.cachedFrame.scaled(
+                    outW, outH,
+                    Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                layer = &rescaled;
+            }
+
+            // Per-clip image effects (Mirror Left etc.) run BEFORE the blend.
+            // We need a detached copy — `ts.cachedFrame` is cached across
+            // ticks and mutating it would corrupt subsequent frame pulls on
+            // the same clip; `rescaled` is local but in the identity-size
+            // fast path `layer` still points at the cache.
+            QImage effected;
+            if (!clip.effects.isEmpty()) {
+                effected = layer->copy();
+                applyClipEffects(effected, clip.effects);
+                layer = &effected;
+            }
+
+            applyBlend(accum, *layer, alpha, clip.blendMode);
         }
 
-        const Tick effStart = std::max(clipStart, rStart);
-        dec.seekToMasterTick(effStart);
+        // Feed the composited BGRA accumulator into swscale → YUV/NV12.
+        if (!ensureSws(outW, outH, AV_PIX_FMT_BGRA)) {
+            aborted = true; abortMsg = "sws_getContext failed"; break;
+        }
+        err = av_frame_make_writable(encFrame);
+        if (err < 0) { aborted = true; abortMsg = "frame_make_writable"; break; }
 
-        while (!aborted) {
-            QImage bgra;
-            Tick   gotTick = 0;
-            if (!dec.pullFrame(bgra, gotTick, true)) break;   // EOF or error
-            if (gotTick < effStart) continue;                 // pre-roll tail
-            if (gotTick >= std::min(clipEnd, rEnd)) break;
+        const uint8_t* src[4] = {
+            accum.constBits(), nullptr, nullptr, nullptr };
+        int srcStride[4] = {
+            static_cast<int>(accum.bytesPerLine()), 0, 0, 0 };
+        sws_scale(sws, src, srcStride, 0, outH,
+                  encFrame->data, encFrame->linesize);
 
-            // Feed the BGRA QImage into swscale → YUV420P/NV12 AVFrame.
-            if (!ensureSws(bgra.width(), bgra.height(), AV_PIX_FMT_BGRA)) {
-                aborted = true; abortMsg = "sws_getContext failed"; break;
-            }
-            err = av_frame_make_writable(encFrame);
-            if (err < 0) { aborted = true; abortMsg = "frame_make_writable"; break; }
+        encFrame->pts     = outputFrameIdx;
+        encFrame->pkt_dts = outputFrameIdx;
+        if (killIFrames && outputFrameIdx > 0) {
+            encFrame->pict_type = AV_PICTURE_TYPE_P;
+        } else {
+            encFrame->pict_type = AV_PICTURE_TYPE_NONE;
+        }
 
-            const uint8_t* src[4] = {
-                bgra.constBits(), nullptr, nullptr, nullptr };
-            int srcStride[4] = {
-                static_cast<int>(bgra.bytesPerLine()), 0, 0, 0 };
-            sws_scale(sws, src, srcStride, 0, bgra.height(),
-                      encFrame->data, encFrame->linesize);
+        err = avcodec_send_frame(codec, encFrame);
+        if (err < 0) {
+            aborted = true; abortMsg = "send_frame: " + fferr(err); break;
+        }
+        if (!drainEncoder(false)) { aborted = true; break; }
 
-            encFrame->pts       = outputFrameIdx;
-            encFrame->pkt_dts   = outputFrameIdx;
-            // Kill-I-frames: every frame except the first pretends to be a
-            // P-frame so x264 doesn't insert IDRs anywhere in the GOP.
-            if (killIFrames && outputFrameIdx > 0) {
-                encFrame->pict_type = AV_PICTURE_TYPE_P;
-            } else {
-                encFrame->pict_type = AV_PICTURE_TYPE_NONE;
-            }
-
-            err = avcodec_send_frame(codec, encFrame);
-            if (err < 0) {
-                aborted = true; abortMsg = "send_frame: " + fferr(err); break;
-            }
-            if (!drainEncoder(false)) { aborted = true; break; }
-
-            ++outputFrameIdx;
-            if ((outputFrameIdx % 4) == 0) {
-                emit progress(static_cast<int>(outputFrameIdx), totalFrames);
-            }
+        ++outputFrameIdx;
+        if ((outputFrameIdx % 4) == 0) {
+            emit progress(static_cast<int>(outputFrameIdx), totalFrames);
         }
     }
 

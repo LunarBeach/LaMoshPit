@@ -15,6 +15,7 @@
 #include <QSpinBox>
 #include <QDoubleSpinBox>
 #include <QPushButton>
+#include <QAbstractButton>
 #include <QFrame>
 #include <QInputDialog>
 #include <QFileDialog>
@@ -501,6 +502,10 @@ GlobalParamsWidget::GlobalParamsWidget(QWidget* parent)
 
     connect(m_btnApply, &QPushButton::clicked,
             this, &GlobalParamsWidget::applyRequested);
+
+    // Scope C — wire every knob / combobox / toggle to paramsChanged so
+    // the unified undo stack can snapshot before/after on each user edit.
+    connectKnobsForChangeTracking();
 }
 
 // =============================================================================
@@ -612,6 +617,10 @@ GlobalEncodeParams GlobalParamsWidget::currentParams() const
 
 void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
 {
+    // Suppress paramsChanged during the programmatic push.  Undo/redo
+    // replays call this; emitting the signal would re-trigger command
+    // creation and corrupt the stack.
+    m_suppressParamsChanged = true;
     m_cbKillIFrames->setChecked(p.killIFrames);
     m_cbScenecut->setChecked(p.scenecut);
     m_sbGopSize->setValue(p.gopSize);
@@ -674,6 +683,46 @@ void GlobalParamsWidget::setParams(const GlobalEncodeParams& p)
     m_cbQblurEnable->setChecked(p.qblurEnabled);
     m_dsbQblur->setValue(p.qblur);
     m_dsbQblur->setEnabled(p.qblurEnabled);
+    m_suppressParamsChanged = false;
+}
+
+// =============================================================================
+// Scope C — change tracking
+// =============================================================================
+
+void GlobalParamsWidget::emitParamsChangedIfLive()
+{
+    if (m_suppressParamsChanged) return;
+    emit paramsChanged();
+}
+
+void GlobalParamsWidget::connectKnobsForChangeTracking()
+{
+    // Use findChildren so every widget of each kind is hooked up without
+    // having to list all ~30 members manually.  Any widget added later
+    // picks up undo tracking for free.
+    for (QSpinBox* sb : findChildren<QSpinBox*>()) {
+        connect(sb, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &GlobalParamsWidget::emitParamsChangedIfLive);
+    }
+    for (QDoubleSpinBox* dsb : findChildren<QDoubleSpinBox*>()) {
+        connect(dsb, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &GlobalParamsWidget::emitParamsChangedIfLive);
+    }
+    for (QComboBox* cb : findChildren<QComboBox*>()) {
+        // Skip the preset picker — it triggers setParams internally, which
+        // suppresses paramsChanged, but the combobox itself also emits
+        // currentIndexChanged.  Preset loads are already covered by setParams's
+        // suppression window — this is a safety belt.
+        if (cb == m_presetCombo) continue;
+        connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &GlobalParamsWidget::emitParamsChangedIfLive);
+    }
+    for (ToggleSwitch* ts : findChildren<ToggleSwitch*>()) {
+        // ToggleSwitch inherits toggled() from QAbstractButton.
+        connect(ts, &QAbstractButton::toggled,
+                this, &GlobalParamsWidget::emitParamsChangedIfLive);
+    }
 }
 
 // =============================================================================

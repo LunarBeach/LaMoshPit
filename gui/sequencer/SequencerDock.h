@@ -13,6 +13,7 @@
 #include "core/sequencer/Tick.h"
 #include "core/sequencer/SequencerRenderer.h"   // needed for renderRequested signal signature
 #include <QDockWidget>
+#include <QJsonObject>
 #include <memory>
 
 class QPushButton;
@@ -20,6 +21,7 @@ class QSlider;
 class QLabel;
 class QCheckBox;
 class QComboBox;
+class QThread;
 
 namespace sequencer {
 
@@ -31,6 +33,7 @@ class SequencerPreviewPlayer;
 class SequencerTimelineView;
 class SequencerTrackHeader;
 class SequencerTransitionPanel;
+class SequencerClipPropertiesPanel;
 
 class SequencerDock : public QDockWidget {
     Q_OBJECT
@@ -43,6 +46,13 @@ public:
     // so we use the filter for these keys only.  I/O/L/Space remain
     // QShortcut-based.
     bool eventFilter(QObject* watched, QEvent* event) override;
+
+    // Delegates to the internal FrameRouter's config persistence.  Lets
+    // MainWindow snapshot the live transition type / params / hotkey mode
+    // into project.json without exposing the router itself.  See
+    // FrameRouter::configToJson for shape.
+    QJsonObject routerConfigToJson() const;
+    void        routerConfigFromJson(const QJsonObject& obj);
 
 signals:
     // Emitted when the user confirms the Render dialog.  MainWindow owns
@@ -71,13 +81,21 @@ private:
 
     SequencerProject*                       m_project { nullptr };
     std::unique_ptr<SequencerPlaybackClock> m_clock;
-    std::unique_ptr<FrameRouter>            m_router;
+    // m_router is owned by m_routerThread (moveToThread + deleteLater on
+    // thread finished); we hold a raw pointer here because unique_ptr
+    // would try to destroy the object on the GUI thread during Dock
+    // destruction, which is unsafe for a QObject that lives on a
+    // different thread.  Lifetime: created in ctor, destroyed by the
+    // deleteLater chain during ~SequencerDock after thread shutdown.
+    FrameRouter*                            m_router       { nullptr };
+    QThread*                                m_routerThread { nullptr };
     std::unique_ptr<SpoutSender>            m_spout;
 
-    SequencerPreviewPlayer*    m_preview        { nullptr };
-    SequencerTrackHeader*      m_trackHeader    { nullptr };
-    SequencerTimelineView*     m_timelineView   { nullptr };
-    SequencerTransitionPanel*  m_transitionPanel{ nullptr };
+    SequencerPreviewPlayer*       m_preview         { nullptr };
+    SequencerTrackHeader*         m_trackHeader     { nullptr };
+    SequencerTimelineView*        m_timelineView    { nullptr };
+    SequencerTransitionPanel*     m_transitionPanel { nullptr };
+    SequencerClipPropertiesPanel* m_clipPropsPanel  { nullptr };
 
     QPushButton* m_btnPlay     { nullptr };
     QPushButton* m_btnStop     { nullptr };
@@ -88,6 +106,8 @@ private:
     QCheckBox*   m_chkSpout    { nullptr };
     QLabel*      m_spoutStatus { nullptr };
     QComboBox*   m_hotkeyMode  { nullptr };
+    QComboBox*   m_composeMode { nullptr };
+    QComboBox*   m_seqFps      { nullptr };
     QSlider*     m_seek        { nullptr };
     QLabel*      m_timeLabel   { nullptr };
 

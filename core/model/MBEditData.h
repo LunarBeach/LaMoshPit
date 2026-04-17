@@ -203,6 +203,11 @@ struct FrameMBParams {
     int  bsCbpZeroLuma    = -1;  // −1 = inherit parent; 0..100
     int  bsCbpZeroChroma  = -1;  // −1 = inherit parent; 0..100
     int  bsSuppressResOnMvd = 1; // 0/1, default on
+
+    // C++20 defaulted equality — used by the Scope C undo debouncer to
+    // diff live widget state against the last-known committed state.
+    // QSet<int> and the int fields all support ==, so defaulting works.
+    bool operator==(const FrameMBParams&) const = default;
 };
 
 // Frame display-order index → per-MB edit parameters.

@@ -20,8 +20,8 @@
 //   Global Encode: { "presetType":"global_encode", "version":1, "params":{...} }
 //   Quick Mosh:    { "presetType":"quick_mosh",   "version":1, "mb":{...}, "gp":{...} }
 //
-// Note: selectedMBs and spatialMaskMBs are intentionally NOT serialised —
-// presets capture only the control knob values, not canvas selections.
+// Note: selectedMBs are intentionally NOT serialised — presets capture only
+// the control knob values, not canvas selections.
 // =============================================================================
 class PresetManager {
 public:

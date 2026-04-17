@@ -108,6 +108,16 @@ private:
     // During a drag, indicates the target track (row under cursor) so we
     // can draw a drop indicator.  -1 when no drag in progress.
     int m_dropHoverTrack { -1 };
+
+    // Persistent "canonical selection" (trackIdx, clipIdx).  QGraphicsItem
+    // selection state is wiped when rebuildClipItems() tears down and re-
+    // creates items after every project edit — if we relied on that alone,
+    // the Clip Properties panel would dim after every knob turn that fires
+    // a ChangeClipPropertyCmd.  These members track the logical selection
+    // through rebuilds; onProjectChanged re-applies it after the rebuild.
+    // (-1, -1) means "nothing selected."
+    int m_selectedTrackIdx { -1 };
+    int m_selectedClipIdx  { -1 };
 };
 
 } // namespace sequencer

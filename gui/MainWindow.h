@@ -1,8 +1,11 @@
 #pragma once
 
 #include <QVector>
+#include <QJsonObject>
 #include <memory>
 #include <kddockwidgets/qtwidgets/views/MainWindow.h>
+
+#include "core/model/MBEditData.h"
 #include "core/model/VideoSequence.h"
 #include "gui/BitstreamAnalyzer.h"
 #include "core/transform/FrameTransformer.h"
@@ -27,6 +30,9 @@ namespace sequencer {
     class SequencerProject;
     class SequencerDock;
 }
+namespace undo {
+    class UndoController;
+}
 class QPushButton;
 class QProgressBar;
 class QLabel;
@@ -34,6 +40,7 @@ class QAction;
 class QSplitter;
 class QDockWidget;
 class QMenu;
+class QTimer;
 
 namespace KDDockWidgets { namespace QtWidgets { class DockWidget; } }
 
@@ -143,6 +150,68 @@ private:
     // project folders when the user picks "New Project".
     QString defaultProjectsRoot();
 
+    // Refresh the window title from m_project + dirty state.  Called on
+    // project load, project rename, and every time Project::dirtyChanged
+    // fires.  The dirty state is shown as a leading "*" before the project
+    // name (standard Qt/Windows convention for unsaved-changes indication).
+    void updateWindowTitle();
+
+    // User-initiated clip-switch entry point.  Creates a ClipSwitchCommand
+    // and submits it to m_undoController so the swap itself is undoable —
+    // Ctrl+Z walks back through clip swaps as well as param/selection edits.
+    // First-load scenarios (empty outgoing path, project resume with fresh
+    // controller) bypass command creation and call switchActiveClipDirect
+    // directly so there's nothing to "undo" into a pristine session.
+    void switchActiveClip(const QString& newPath);
+
+    // Mechanical clip swap without command creation.  Captures the outgoing
+    // clip's in-flight state into Project, loads the new clip through the
+    // standard analyze/preview pipeline, re-hydrates stashed incoming
+    // edits.  Called by:
+    //   - switchActiveClip (first-load path, no command needed)
+    //   - ClipSwitchCommand::redo / undo (mechanical apply — command
+    //     creation by redo/undo would cause stack re-entry)
+    // Public because ClipSwitchCommand is a non-friend type in gui/undo/.
+public:
+    void switchActiveClipDirect(const QString& newPath);
+private:
+
+    // Serialize the currently-displayed clip's MB edits + Global Encode
+    // Params into a JSON blob suitable for stashing in Project::setClipEditJson.
+    // Shape:
+    //   { version: 1,
+    //     mbEdits:      { "<frameIdx>": <FrameMBParams json>, ... },
+    //     globalParams: <GlobalEncodeParams json> }
+    QJsonObject captureCurrentClipEdits() const;
+
+    // Restore a previously-stashed blob (built by captureCurrentClipEdits)
+    // into the MB-editor and Global Encode Params widgets.  Safe to call
+    // with an empty object — acts as a no-op.
+    void applyClipEdits(const QJsonObject& state);
+
+    // Pre-save capture pass — snapshots the current clip's edits, the
+    // sequencer state, and the router config into m_project, then calls
+    // Project::save().  Shared by File → Save Project and the Save branch
+    // of the close-event prompt so both paths persist the full session.
+    // Returns whatever Project::save returned; errorMsg is populated on
+    // failure.
+    bool saveActiveProject(QString& errorMsg);
+
+    // ── Scope C undo snapshot tracking ──────────────────────────────────
+    // m_lastKnownMBEdits / m_lastKnownGP hold the "committed" state the
+    // undo stack thinks the widgets are in.  MainWindow compares the live
+    // widget state against these caches after a debounce timeout; if they
+    // differ, it builds a command with before=cache, after=live, pushes
+    // it, and updates the cache.  See onMBEditCommitted / commitMBEditIfChanged.
+    void syncLastKnownToWidgets();
+    void onMBEditCommitted();        // slot wired to MacroblockWidget::editCommitted
+    void commitMBEditIfChanged();    // timer timeout — diff + maybe push command
+    void onGPParamsChanged();        // slot wired to GlobalParamsWidget::paramsChanged
+    void commitGPIfChanged();        // timer timeout — diff + maybe push command
+    // Pressed before Ctrl+Z/Ctrl+Shift+Z — forces any pending debounced
+    // edit to commit immediately so undo works on the latest action.
+    void flushPendingCommits();
+
     // ── Layout widgets ────────────────────────────────────────────────────
     TimelineWidget*      m_timeline    { nullptr };
     PreviewPlayer*       m_preview     { nullptr };
@@ -158,6 +227,25 @@ private:
     // mosh editor.  Dockable preview + (future) multi-track timeline.
     sequencer::SequencerProject* m_seqProject { nullptr };   // owned by MainWindow
     sequencer::SequencerDock*    m_seqDock    { nullptr };
+
+    // Scope C unified undo/redo stack.  Every user action (clip switch,
+    // MB edit, Global Params tweak, sequencer edit) runs through this.
+    // Cleared on project switch so history doesn't leak across projects.
+    std::unique_ptr<undo::UndoController> m_undoController;
+
+    // Snapshot of widget state that the undo stack "knows about".  Updated
+    // after every switchActiveClipDirect, applyClipEdits, and command
+    // execute/undo/redo.  The debounced committer diffs live-vs-cached to
+    // decide whether to build a new command.
+    MBEditMap          m_lastKnownMBEdits;
+    GlobalEncodeParams m_lastKnownGP {};
+    // Debounce timers — multiple change signals inside the window collapse
+    // into a single command.  ~200 ms balances "rapid drag → one command"
+    // against "press Ctrl+Z immediately after a discrete action and feel
+    // the undo work".  flushPendingCommits forces an immediate commit
+    // before undo/redo runs so no edit goes missing.
+    QTimer* m_mbCommitTimer { nullptr };
+    QTimer* m_gpCommitTimer { nullptr };
 
     // Dock wrappers — one per panel, using KDDockWidgets so floating windows
     // can themselves host nested splits and tabs (native QDockWidget only

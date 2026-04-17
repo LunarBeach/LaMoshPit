@@ -3,6 +3,9 @@
 #include "gui/sequencer/SequencerTimelineView.h"
 #include "gui/sequencer/SequencerTrackHeader.h"
 #include "gui/sequencer/SequencerTransitionPanel.h"
+#include "gui/sequencer/SequencerClipPropertiesPanel.h"
+#include "core/sequencer/ClipEffects.h"
+#include "core/sequencer/EditCommand.h"
 #include "gui/sequencer/SequencerRenderDialog.h"
 #include "core/sequencer/SequencerProject.h"
 #include "core/sequencer/SequencerTrack.h"
@@ -21,14 +24,59 @@
 #include <QCheckBox>
 #include <QLabel>
 #include <QFrame>
+#include <QListWidget>
+#include <QMimeData>
 #include <QShortcut>
 #include <QKeySequence>
 #include <QComboBox>
+#include <QSignalBlocker>
 #include <QApplication>
 #include <QKeyEvent>
 #include <QFileInfo>
+#include <QThread>
+
+// Match the flag from core/sequencer/SequencerPlaybackClock.cpp.  Set to 0
+// in both places to disable the pacing log.
+#define LAMOSH_TICK_DEBUG_LOG 1
+namespace sequencer { qint64 tickLogWallMs(); } // defined in SequencerPlaybackClock.cpp
 
 namespace sequencer {
+namespace {
+
+// ── EffectsRackList ────────────────────────────────────────────────────────
+// Tiny QListWidget subclass that packages the selected item's effect id
+// into the custom drag MIME (kClipEffectMimeType) so the timeline view can
+// identify the dropped effect without having to parse Qt's internal
+// item-model MIME.  The drag source is the only place that speaks this
+// MIME; the drop target lives in SequencerTimelineView.
+// ──────────────────────────────────────────────────────────────────────────
+class EffectsRackList : public QListWidget {
+public:
+    explicit EffectsRackList(QWidget* parent = nullptr)
+        : QListWidget(parent)
+    {
+        setDragEnabled(true);
+        setDragDropMode(QAbstractItemView::DragOnly);
+        setSelectionMode(QAbstractItemView::SingleSelection);
+    }
+
+protected:
+    QStringList mimeTypes() const override {
+        return { QString::fromLatin1(kClipEffectMimeType) };
+    }
+
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
+        auto* md = new QMimeData;
+        if (!items.isEmpty()) {
+            const QString id = items.first()->data(Qt::UserRole).toString();
+            if (!id.isEmpty())
+                md->setData(kClipEffectMimeType, id.toUtf8());
+        }
+        return md;
+    }
+};
+
+} // namespace
 
 SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     : QDockWidget("NLE Sequencer", parent)
@@ -63,6 +111,65 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     transitionTitle->setStyleSheet(
         "QLabel { color:#ddd; font:bold 9pt 'Segoe UI'; padding:2px; }");
     transitionBoxLayout->addWidget(transitionTitle);
+    // Output mode — LayerComposite (authoring, every track visible with
+    // its compositor properties) vs LiveVJ (single-active-track routing
+    // with hotkey-triggered transitions).  Placed first in the column
+    // because it gates whether the rest of the live-VJ controls below
+    // actually do anything.
+    auto* composeRow = new QHBoxLayout;
+    auto* composeLabel = new QLabel("Output Mode:", transitionBox);
+    composeLabel->setStyleSheet("QLabel { color:#ddd; font:9pt 'Segoe UI'; }");
+    m_composeMode = new QComboBox(transitionBox);
+    m_composeMode->addItem("Render Preview (layer composite)",
+                           int(FrameRouter::ComposeMode::LayerComposite));
+    m_composeMode->addItem("Live VJ (active track + transitions)",
+                           int(FrameRouter::ComposeMode::LiveVJ));
+    m_composeMode->setToolTip(
+        "Render Preview: every enabled track is composited bottom-up using\n"
+        "  each clip's opacity / blend mode / fade envelope.  The preview\n"
+        "  reflects exactly what the offline renderer will bake.  Hotkey\n"
+        "  switches and live transitions are inert.\n\n"
+        "Live VJ: single-active-track routing.  Number keys 1-9 cue track\n"
+        "  changes via the active transition (Switch mode) or play a track\n"
+        "  while held (Touch mode).  Clip opacity / blend mode / fades are\n"
+        "  ignored — use Render Preview when authoring for rendering.");
+    composeRow->addWidget(composeLabel);
+    composeRow->addWidget(m_composeMode, /*stretch=*/1);
+    transitionBoxLayout->addLayout(composeRow);
+
+    // Sequence frame rate — the timeline's authoritative playback + render
+    // cadence.  Mixed-fps source clips are sampled to this rate via each
+    // chain's catch-up loop (60 → 30 drops every other frame; 24 → 30
+    // holds some frames across two ticks).  Changing this drives both the
+    // preview clock and the offline render output fps.
+    auto* fpsRow   = new QHBoxLayout;
+    auto* fpsLabel = new QLabel("Sequence FPS:", transitionBox);
+    fpsLabel->setStyleSheet("QLabel { color:#ddd; font:9pt 'Segoe UI'; }");
+    m_seqFps = new QComboBox(transitionBox);
+    // AVRational entries stored as (num, den) packed into a QPair so the
+    // combo's data round-trips exactly — 23.976 = 24000/1001, not a float.
+    auto addFps = [this](const char* label, int num, int den) {
+        m_seqFps->addItem(QString::fromLatin1(label),
+                          QVariant::fromValue(QPoint(num, den)));
+    };
+    addFps("23.976",  24000, 1001);
+    addFps("24",         24,    1);
+    addFps("25",         25,    1);
+    addFps("29.97",  30000, 1001);
+    addFps("30",         30,    1);
+    addFps("50",         50,    1);
+    addFps("59.94",  60000, 1001);
+    addFps("60",         60,    1);
+    m_seqFps->setToolTip(
+        "The sequence's authoritative playback + render frame rate.\n"
+        "Source clips at different frame rates are sampled to this rate\n"
+        "(e.g. a 60fps source on a 30fps sequence contributes every other\n"
+        "frame to the preview AND the rendered output).  Change this to\n"
+        "match your delivery target BEFORE rendering.");
+    fpsRow->addWidget(fpsLabel);
+    fpsRow->addWidget(m_seqFps, /*stretch=*/1);
+    transitionBoxLayout->addLayout(fpsRow);
+
     m_transitionPanel = new SequencerTransitionPanel(transitionBox);
     transitionBoxLayout->addWidget(m_transitionPanel);
 
@@ -78,7 +185,8 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     m_hotkeyMode->setToolTip(
         "Switch: press 1-9 to trigger the active transition to that track.\n"
         "Touch:  hold 1-9 to route that track live; release returns to the\n"
-        "         topmost track with content at the playhead.");
+        "         topmost track with content at the playhead.\n"
+        "(Both are inert while Output Mode is Render Preview.)");
     modeRow->addWidget(modeLabel);
     modeRow->addWidget(m_hotkeyMode, /*stretch=*/1);
     transitionBoxLayout->addLayout(modeRow);
@@ -95,6 +203,55 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     spoutRow->addWidget(m_chkSpout);
     spoutRow->addWidget(m_spoutStatus, /*stretch=*/1);
     transitionBoxLayout->addLayout(spoutRow);
+
+    // ── Effects Rack ─────────────────────────────────────────────────────
+    // Palette of image effects that the user drags onto a clip in the
+    // timeline to apply.  Render-time feature (same scope as Clip
+    // Properties below) — effects run during the LayerComposite preview
+    // and the offline render.  Extensible: adding a new effect means
+    // extending the ClipEffect enum + availableClipEffects() + the
+    // applyClipEffects() switch.  UI picks everything up automatically.
+    {
+        auto* fxSep = new QFrame(transitionBox);
+        fxSep->setFrameShape(QFrame::HLine);
+        fxSep->setFrameShadow(QFrame::Sunken);
+        fxSep->setStyleSheet("QFrame { color:#333; }");
+        transitionBoxLayout->addWidget(fxSep);
+    }
+    auto* fxTitle = new QLabel("Effects Rack", transitionBox);
+    fxTitle->setStyleSheet(
+        "QLabel { color:#ddd; font:bold 9pt 'Segoe UI'; padding:2px; }");
+    fxTitle->setToolTip("Drag an effect onto a clip in the timeline to apply it.");
+    transitionBoxLayout->addWidget(fxTitle);
+
+    auto* effectsRack = new EffectsRackList(transitionBox);
+    effectsRack->setMaximumHeight(88);
+    effectsRack->setToolTip("Drag onto a clip in the timeline to apply.");
+    for (ClipEffect e : availableClipEffects()) {
+        auto* item = new QListWidgetItem(clipEffectDisplayName(e), effectsRack);
+        item->setData(Qt::UserRole, clipEffectId(e));
+    }
+    transitionBoxLayout->addWidget(effectsRack);
+
+    // ── Clip Properties (render-time, stacked under Live Transition) ─────
+    // Separator + heading so the render-only controls are visually distinct
+    // from the live-VJ knobs above.  Same vertical column since both are
+    // "inspector" surfaces for the sequencer.
+    auto* sep = new QFrame(transitionBox);
+    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShadow(QFrame::Sunken);
+    sep->setStyleSheet("QFrame { color:#333; }");
+    transitionBoxLayout->addWidget(sep);
+
+    auto* clipPropsTitle = new QLabel("Clip Properties (render)", transitionBox);
+    clipPropsTitle->setStyleSheet(
+        "QLabel { color:#ddd; font:bold 9pt 'Segoe UI'; padding:2px; }");
+    clipPropsTitle->setToolTip(
+        "Applies when baking the project with the Render button.\n"
+        "Live VJ output via Spout is unaffected by these controls.");
+    transitionBoxLayout->addWidget(clipPropsTitle);
+    m_clipPropsPanel = new SequencerClipPropertiesPanel(transitionBox);
+    transitionBoxLayout->addWidget(m_clipPropsPanel);
 
     transitionBoxLayout->addStretch(1);
     topLayout->addWidget(transitionBox, /*stretch=*/1);
@@ -129,8 +286,29 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     tlLayout->setSpacing(0);
 
     // Engine — clock + router before timeline so the view can hook in.
+    // The clock stays on the GUI thread (it owns a QTimer whose cadence
+    // drives the preview).  The router moves to its own worker thread so
+    // heavy per-tick compositing never blocks the GUI.  All signals
+    // between clock ↔ router and router ↔ preview / Spout are
+    // auto-connection → resolves to QueuedConnection across the thread
+    // boundary, which is correct.  The router's own public API methods
+    // (setComposeMode, requestTrackSwitch, etc.) internally marshal to
+    // the router's thread via QMetaObject::invokeMethod.
     m_clock  = std::make_unique<SequencerPlaybackClock>(this);
-    m_router = std::make_unique<FrameRouter>(m_project, m_clock.get(), this);
+    // Router is deliberately NOT parented — QObject's thread affinity is
+    // moved with the object, but a parent enforces same-thread destruction
+    // which conflicts with our moveToThread + deleteLater pattern.
+    m_router = new FrameRouter(m_project, m_clock.get(), /*parent=*/nullptr);
+    m_routerThread = new QThread(this);
+    m_routerThread->setObjectName(QStringLiteral("FrameRouterThread"));
+    m_router->moveToThread(m_routerThread);
+    // Tear-down: when the thread finishes its event loop (triggered by
+    // our destructor's quit()), delete the router.  The thread itself is
+    // parented to `this` so it's destroyed during ~QDockWidget, after
+    // our destructor has already called quit()+wait().
+    connect(m_routerThread, &QThread::finished,
+            m_router,       &QObject::deleteLater);
+    m_routerThread->start();
     m_spout  = std::make_unique<SpoutSender>(this);
 
     m_trackHeader  = new SequencerTrackHeader(m_project, tlHost);
@@ -151,7 +329,7 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
     setWidget(root);
 
     // ── Signal wiring ──────────────────────────────────────────────────────
-    connect(m_router.get(), &FrameRouter::frameReady,
+    connect(m_router, &FrameRouter::frameReady,
             m_preview,      &SequencerPreviewPlayer::onFrameReady);
 
     connect(m_clock.get(), &SequencerPlaybackClock::tickAdvanced,
@@ -179,17 +357,50 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
             this,         &SequencerDock::onSeekSliderMoved);
 
     // Router frames fan out to both preview AND Spout (when enabled).
-    connect(m_router.get(), &FrameRouter::frameReady,
+    connect(m_router, &FrameRouter::frameReady,
             m_spout.get(),  &SpoutSender::onFrameReady);
 
     // Transition panel → router.
     connect(m_transitionPanel, &SequencerTransitionPanel::typeChanged,
-            m_router.get(),    &FrameRouter::setTransitionTypeId);
+            m_router,    &FrameRouter::setTransitionTypeId);
     connect(m_transitionPanel, &SequencerTransitionPanel::paramsChanged,
-            m_router.get(),    &FrameRouter::setTransitionParams);
+            m_router,    &FrameRouter::setTransitionParams);
     // Prime router with the panel's initial values.
     m_router->setTransitionTypeId(m_transitionPanel->currentTypeId());
     m_router->setTransitionParams(m_transitionPanel->currentParams());
+
+    // Clip Properties — timeline selection populates the panel, panel edits
+    // flow back as ChangeClipPropertyCmd on the sequencer's own undo stack.
+    connect(m_timelineView, &SequencerTimelineView::selectedClipChanged,
+            this, [this](int trackIdx, int clipIdx) {
+        if (!m_clipPropsPanel || !m_project) return;
+        if (trackIdx < 0 || clipIdx < 0
+            || trackIdx >= m_project->trackCount()) {
+            m_clipPropsPanel->setSelection(-1, -1, nullptr);
+            return;
+        }
+        const auto& track = m_project->track(trackIdx);
+        if (clipIdx >= track.clips.size()) {
+            m_clipPropsPanel->setSelection(-1, -1, nullptr);
+            return;
+        }
+        m_clipPropsPanel->setSelection(trackIdx, clipIdx, &track.clips[clipIdx]);
+    });
+    connect(m_clipPropsPanel, &SequencerClipPropertiesPanel::propertiesEdited,
+            this, [this](int trackIdx, int clipIdx,
+                         float opacity, BlendMode blend,
+                         Tick fadeIn, Tick fadeOut) {
+        if (!m_project) return;
+        m_project->executeCommand(std::make_unique<ChangeClipPropertyCmd>(
+            trackIdx, clipIdx, opacity, blend, fadeIn, fadeOut));
+    });
+    connect(m_clipPropsPanel, &SequencerClipPropertiesPanel::effectsEdited,
+            this, [this](int trackIdx, int clipIdx,
+                         QVector<ClipEffect> effects) {
+        if (!m_project) return;
+        m_project->executeCommand(std::make_unique<ChangeClipEffectsCmd>(
+            trackIdx, clipIdx, std::move(effects)));
+    });
 
     // Hotkeys for I/O/L/Space — use QShortcut with WidgetWithChildrenShortcut
     // context so they fire when any descendant of the dock has focus.
@@ -224,12 +435,128 @@ SequencerDock::SequencerDock(SequencerProject* project, QWidget* parent)
         m_router->setHotkeyMode(mode);
     });
 
+    // Output-mode selector → router.  Also prime the router with the
+    // panel's current choice so the default matches the UI on first load.
+    connect(m_composeMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (!m_router || !m_composeMode) return;
+        const auto mode = static_cast<FrameRouter::ComposeMode>(
+            m_composeMode->currentData().toInt());
+        m_router->setComposeMode(mode);
+    });
+    m_router->setComposeMode(static_cast<FrameRouter::ComposeMode>(
+        m_composeMode->currentData().toInt()));
+
+    // Sequence FPS → project.  setOutputFrameRate already no-ops on same-
+    // rate writes so wiring currentIndexChanged doesn't churn.  The
+    // reverse direction (project → combo sync) is below.
+    connect(m_seqFps, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (!m_project || !m_seqFps) return;
+        const QPoint packed = m_seqFps->currentData().toPoint();
+        AVRational r { packed.x(), packed.y() };
+        m_project->setOutputFrameRate(r);
+    });
+    // Sync combo to the current project fps on construction, and on every
+    // future outputFrameRateChanged (e.g. project load).  Find the combo
+    // entry whose packed (num, den) matches; fall back to item 0 (23.976)
+    // if none match — keeps the UI coherent for legacy projects saved
+    // with an off-preset rate.
+    auto syncSeqFpsCombo = [this]() {
+        if (!m_project || !m_seqFps) return;
+        const AVRational r = m_project->outputFrameRate();
+        QSignalBlocker b(m_seqFps);
+        for (int i = 0; i < m_seqFps->count(); ++i) {
+            const QPoint packed = m_seqFps->itemData(i).toPoint();
+            if (packed.x() == r.num && packed.y() == r.den) {
+                m_seqFps->setCurrentIndex(i);
+                return;
+            }
+        }
+    };
+    if (m_project) {
+        connect(m_project, &SequencerProject::outputFrameRateChanged,
+                this, syncSeqFpsCombo);
+    }
+    syncSeqFpsCombo();
+
+    // Dock-scoped undo/redo — fires only when focus is inside this dock
+    // (Qt::WidgetWithChildrenShortcut).  The MB editor's Ctrl+Z lives on
+    // the Edit menu with the default WindowShortcut context; that
+    // narrower context wins here when the user is focused on sequencer
+    // content, so the two stacks never cross-contaminate.
+    {
+        auto* undoSc = new QShortcut(QKeySequence::Undo, this);
+        undoSc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(undoSc, &QShortcut::activated, this, [this]() {
+            if (m_project) m_project->undo();
+        });
+        auto* redoSc1 = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+Z")), this);
+        redoSc1->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(redoSc1, &QShortcut::activated, this, [this]() {
+            if (m_project) m_project->redo();
+        });
+        auto* redoSc2 = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Y")), this);
+        redoSc2->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(redoSc2, &QShortcut::activated, this, [this]() {
+            if (m_project) m_project->redo();
+        });
+    }
+
     refreshDurationUi();
 }
 
 SequencerDock::~SequencerDock()
 {
     if (qApp) qApp->removeEventFilter(this);
+
+    // Shutdown order (important):
+    //   1. Stop the clock so no further tickAdvanced fires cross-thread.
+    //      Any already-queued ticks are discarded when the router's event
+    //      loop exits below — slots posted to a dying QObject are dropped.
+    //   2. Quit the router's event loop and wait.  On finished(), the
+    //      previously-wired deleteLater deletes the router on its own
+    //      thread before wait() returns — that's the canonical Qt idiom
+    //      and avoids "delete a QObject from another thread" warnings.
+    //   3. The QThread itself is parented to this QDockWidget and gets
+    //      destroyed in the normal child-deletion chain below — safe
+    //      because it's no longer running.
+    if (m_clock) m_clock->stop();
+    if (m_routerThread) {
+        m_routerThread->quit();
+        m_routerThread->wait();
+    }
+    m_router = nullptr;   // already deleteLater'd on finished()
+}
+
+// =============================================================================
+// Router config persistence — forwarders so MainWindow can save/restore the
+// router state through the dock without having to know about FrameRouter.
+// =============================================================================
+
+QJsonObject SequencerDock::routerConfigToJson() const
+{
+    return m_router ? m_router->configToJson() : QJsonObject();
+}
+
+void SequencerDock::routerConfigFromJson(const QJsonObject& obj)
+{
+    if (!m_router) return;
+    m_router->configFromJson(obj);
+
+    // Sync the dock's dropdowns to match the loaded router state.  Block
+    // signals so re-setting the index doesn't bounce back through the
+    // currentIndexChanged handler and re-push to the router.
+    if (m_hotkeyMode) {
+        QSignalBlocker b(m_hotkeyMode);
+        const int idx = m_hotkeyMode->findData(int(m_router->hotkeyMode()));
+        if (idx >= 0) m_hotkeyMode->setCurrentIndex(idx);
+    }
+    if (m_composeMode) {
+        QSignalBlocker b(m_composeMode);
+        const int idx = m_composeMode->findData(int(m_router->composeMode()));
+        if (idx >= 0) m_composeMode->setCurrentIndex(idx);
+    }
 }
 
 // =============================================================================
@@ -302,12 +629,23 @@ void SequencerDock::onStopClicked()
 
 void SequencerDock::onSeekSliderMoved(int value)
 {
+#if LAMOSH_TICK_DEBUG_LOG
+    qDebug() << "[ui] " << tickLogWallMs() << "ms sliderMoved value=" << value;
+#endif
     if (!m_clock) return;
     m_clock->seek(static_cast<Tick>(value));
 }
 
 void SequencerDock::onClockTickAdvanced(Tick tick)
 {
+#if LAMOSH_TICK_DEBUG_LOG
+    static Tick s_lastSliderTick = -1;
+    const bool backward = (s_lastSliderTick >= 0 && tick < s_lastSliderTick);
+    qDebug() << "[ui] " << tickLogWallMs() << "ms slider<-tick=" << tick
+             << (backward ? "BACKWARD_JUMP" : "")
+             << " prev=" << s_lastSliderTick;
+    s_lastSliderTick = tick;
+#endif
     m_seek->blockSignals(true);
     m_seek->setValue(static_cast<int>(tick));
     m_seek->blockSignals(false);

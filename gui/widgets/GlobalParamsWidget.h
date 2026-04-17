@@ -37,6 +37,13 @@ public:
 signals:
     void applyRequested();
 
+    // Scope C — fired whenever any knob / combobox / toggle here changes.
+    // Emitted only for user interaction; programmatic setParams() suppresses
+    // it so undo-command replays don't re-trigger command creation.
+    // MainWindow listens, debounces, diffs, and creates a
+    // GlobalParamsReplaceCommand for the unified undo stack.
+    void paramsChanged();
+
 private slots:
     void onPresetSelected(int idx);
 
@@ -47,6 +54,12 @@ private slots:
 
 private:
     void refreshUserPresets();
+    // Wire every QAbstractSpinBox / QComboBox / ToggleSwitch child to
+    // paramsChanged, guarded by m_suppressParamsChanged so setParams can
+    // push values in without a feedback loop.
+    void connectKnobsForChangeTracking();
+    // Emit paramsChanged unless currently suppressed (programmatic set).
+    void emitParamsChangedIfLive();
 
 private:
     QComboBox*      m_presetCombo;
@@ -127,4 +140,10 @@ private:
     QPushButton* m_btnUserPresetSave { nullptr };
     QPushButton* m_btnUserPresetDel  { nullptr };
     QPushButton* m_btnUserPresetImport{ nullptr };
+
+    // Scope C — set to true by setParams while it programmatically pushes
+    // values into widgets, so the resulting per-widget change signals
+    // don't cause a paramsChanged emission that would re-trigger command
+    // creation during undo/redo.
+    bool m_suppressParamsChanged { false };
 };

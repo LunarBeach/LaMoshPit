@@ -919,6 +919,7 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
                 if (fi == m_currentFrame)
                     ControlLogger::instance().logKnobChange(name, fi, oldVal, v);
             }
+            emit editCommitted();
         };
         connect(d,  &QDial::valueChanged,
                 this, update);
@@ -973,12 +974,14 @@ MacroblockWidget::MacroblockWidget(QWidget* parent)
         m_edits[m_currentFrame].cascadeLen = v;
         ControlLogger::instance().logKnobChange("Cascade Length", m_currentFrame, oldVal, v);
         m_lblTransLen->setText(QString::number(v) + " frames");
+        emit editCommitted();
     });
     connect(m_sliderTransDecay, &QSlider::valueChanged, this, [this](int v) {
         int oldVal = m_edits[m_currentFrame].cascadeDecay;
         m_edits[m_currentFrame].cascadeDecay = v;
         ControlLogger::instance().logKnobChange("Cascade Decay", m_currentFrame, oldVal, v);
         m_lblTransDecay->setText(QString::number(v) + "%");
+        emit editCommitted();
     });
 
     // ── Brush size + Clear controls ────────────────────────────────────────────
@@ -1312,10 +1315,10 @@ MacroblockWidget::~MacroblockWidget()
 // Public interface
 // =============================================================================
 
-void MacroblockWidget::setProjectPaths(const QString& importedVideosDir,
+void MacroblockWidget::setProjectPaths(const QString& moshVideoFolder,
                                        const QString& selectionMapsDir)
 {
-    m_projectImportedVideosDir = importedVideosDir;
+    m_projectMoshVideoFolder = moshVideoFolder;
     m_projectMapsDir           = selectionMapsDir;
 }
 
@@ -1544,6 +1547,7 @@ void MacroblockWidget::onClearFrame()
         m_edits[m_currentFrame].selectedMBs = std::move(kept);
     }
     loadKnobsFromCurrentFrame();
+    emit editCommitted();
 }
 
 // ── Deselect: clear painted MBs on current frame, keep knob params ──────────
@@ -1602,13 +1606,14 @@ void MacroblockWidget::onSeedSelection()
         else
             m_edits[f].selectedMBs |= sel;     // union: merge
     }
+    emit editCommitted();
 }
 
 // ── Apply Map: use a b/w video to drive MB selection (REPLACES selections) ─
 void MacroblockWidget::onApplyMap()
 {
     if (m_mbCols <= 0 || m_mbRows <= 0 || m_videoPath.isEmpty()) return;
-    if (m_projectImportedVideosDir.isEmpty() || m_projectMapsDir.isEmpty()) {
+    if (m_projectMoshVideoFolder.isEmpty() || m_projectMapsDir.isEmpty()) {
         QMessageBox::information(
             dialogParentFor(m_canvasPanel),
             "Apply Selection Map",
@@ -1617,7 +1622,7 @@ void MacroblockWidget::onApplyMap()
     }
 
     ApplyMapDialog dlg(m_videoPath,
-                       m_projectImportedVideosDir,
+                       m_projectMoshVideoFolder,
                        m_projectMapsDir,
                        m_currentFrame, m_totalFrames,
                        dialogParentFor(m_canvasPanel));
@@ -1655,8 +1660,13 @@ void MacroblockWidget::onApplyMap()
     if (sampled.contains(m_currentFrame)) {
         const QSet<int>& now = m_edits[m_currentFrame].selectedMBs;
         m_canvas->loadSelection(now);
-        // Route through the normal channel so logging + signal fire.
+        // Route through the normal channel so logging + signal fire
+        // (and, via onMBSelectionChanged, editCommitted).
         onMBSelectionChanged(now);
+    } else {
+        // Current frame wasn't in the map's target set, but other frames'
+        // selections still changed — commit for undo.
+        emit editCommitted();
     }
 }
 
@@ -1901,6 +1911,7 @@ void MacroblockWidget::onMBSelectionChanged(const QSet<int>& sel)
     m_edits[m_currentFrame].selectedMBs = sel;
     ControlLogger::instance().logMBSelectionChange(m_currentFrame, oldCount, sel.size());
     emit mbSelectionChanged(sel);
+    emit editCommitted();
 }
 
 void MacroblockWidget::setActiveFrameRange(const QVector<int>& frames)

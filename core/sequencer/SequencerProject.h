@@ -24,7 +24,11 @@
 #include "core/sequencer/SequencerTrack.h"
 #include <QObject>
 #include <QList>
+#include <QJsonObject>
+#include <QReadWriteLock>
 #include <memory>
+
+class Project;   // core/project/Project.h — for token expansion only.
 
 namespace sequencer {
 
@@ -75,6 +79,45 @@ public:
     void undo();
     void redo();
 
+    // Bound the undo stack.  On every executeCommand, if the stack would
+    // exceed this cap, the oldest command is dropped.  Defaults to 50;
+    // MainWindow pushes SettingsDialog::maxUndoStepsSequencer() in after
+    // construction and on Settings-dialog accept.  The sequencer keeps a
+    // separate cap from the MB editor because the two workspaces are
+    // independent — different work cadence, different memory footprints.
+    void setMaxUndoSteps(int n);
+    int  maxUndoSteps() const { return m_maxUndoSteps; }
+
+    // ── Persistence ──────────────────────────────────────────────────────
+    // Serialize / deserialize the tracks, clips, loop region, output rate,
+    // and active track index.  Clip source paths are tokenized via the
+    // passed-in Project (absolute paths under moshVideoFolder() are stored
+    // as "{MoshVideoFolder}/..." so the project survives a drive-letter
+    // change or a vault relocation).
+    //
+    // fromJson replaces all current state.  It also clears the undo/redo
+    // stacks (history from the previous session can't meaningfully apply
+    // to freshly-loaded state).  Returns false only on a structurally-
+    // malformed object; missing / partial fields fall back to defaults.
+    QJsonObject toJson(const ::Project& proj) const;
+    bool        fromJson(const QJsonObject& obj, const ::Project& proj);
+
+    // Reset to the freshly-constructed empty state.  Called on project
+    // switch (new/open) so the dock doesn't carry the previous project's
+    // tracks and clips into the new session.
+    void clear();
+
+    // ── Thread-safety ────────────────────────────────────────────────────
+    // The compositor runs on a worker thread and reads track/clip state
+    // concurrently with GUI-thread edits.  Readers take `QReadLocker lk(&
+    // project->stateLock())`; writers take `QWriteLocker`.  All public
+    // mutators (executeCommand / undo / redo / setActiveTrackIndex /
+    // setOutputFrameRate / setLoopXxx / clear / fromJson) acquire the
+    // write lock internally — callers don't need to lock for those.
+    // Readers MUST hold the read lock for the duration of their access,
+    // because m_tracks / clip fields can change between calls.
+    QReadWriteLock& stateLock() const { return m_stateLock; }
+
 signals:
     void projectChanged();        // any structural change (tracks / clips)
     void activeTrackChanged(int newIndex);
@@ -96,6 +139,16 @@ private:
     // older Qt versions and there's no benefit to implicit sharing here.
     std::vector<std::unique_ptr<EditCommand>> m_undo;
     std::vector<std::unique_ptr<EditCommand>> m_redo;
+
+    // Cap on m_undo.size().  Capping only the undo stack is sufficient:
+    // m_redo is cleared on every new execute, and bounded by how many
+    // times the user can undo (which is ≤ m_maxUndoSteps).
+    int m_maxUndoSteps { 50 };
+
+    // Read-write lock guarding m_tracks + all scalar state fields.  Mutable
+    // so stateLock() stays const — logically the lock is not part of the
+    // project's observable state.
+    mutable QReadWriteLock m_stateLock;
 };
 
 } // namespace sequencer

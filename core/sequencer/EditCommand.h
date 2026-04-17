@@ -177,4 +177,56 @@ private:
     Tick m_originalSourceOut { 0 };
 };
 
+// ── ChangeClipPropertyCmd ────────────────────────────────────────────────────
+// Edit a clip's render-time properties (opacity, blendMode, fadeInTicks,
+// fadeOutTicks) as a batch.  The clip itself is identified by (track,
+// index).  All four fields are passed through because a single UI edit
+// often nudges just one of them; undo/redo swap the whole four-field tuple
+// atomically so partial edits don't accumulate if the user wiggles a knob
+// and then hits Ctrl+Z.
+//
+// This command does NOT call repackContiguous (nothing changes about clip
+// duration or timeline position) — safe to apply repeatedly.
+class ChangeClipPropertyCmd : public EditCommand {
+public:
+    ChangeClipPropertyCmd(int trackIndex, int clipIndex,
+                          float newOpacity, BlendMode newBlend,
+                          Tick newFadeIn, Tick newFadeOut);
+    bool redo(SequencerProject& project) override;
+    void undo(SequencerProject& project) override;
+    QString label() const override { return "Change Clip Properties"; }
+private:
+    int       m_trackIndex;
+    int       m_clipIndex;
+    float     m_newOpacity;
+    BlendMode m_newBlend;
+    Tick      m_newFadeIn;
+    Tick      m_newFadeOut;
+    // Captured on first redo:
+    float     m_oldOpacity  { 1.0f };
+    BlendMode m_oldBlend    { BlendMode::Normal };
+    Tick      m_oldFadeIn   { 0 };
+    Tick      m_oldFadeOut  { 0 };
+};
+
+// ── ChangeClipEffectsCmd ─────────────────────────────────────────────────────
+// Replace a clip's ordered effects list with a new one.  Used by the
+// Effects Rack drag-drop flow (adds one effect to the tail) and by the
+// clip properties panel's effects remove button.  The full new-list is
+// passed through so undo restores an exact snapshot even if the user
+// chains several drops before hitting Ctrl+Z.
+class ChangeClipEffectsCmd : public EditCommand {
+public:
+    ChangeClipEffectsCmd(int trackIndex, int clipIndex,
+                         QVector<ClipEffect> newEffects);
+    bool redo(SequencerProject& project) override;
+    void undo(SequencerProject& project) override;
+    QString label() const override { return "Change Clip Effects"; }
+private:
+    int                 m_trackIndex;
+    int                 m_clipIndex;
+    QVector<ClipEffect> m_new;
+    QVector<ClipEffect> m_old;   // captured on first redo
+};
+
 } // namespace sequencer

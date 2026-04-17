@@ -41,6 +41,15 @@ inline double& timelineZoomXRef()
 }
 inline double timelineZoomX() { return timelineZoomXRef(); }
 
+// Track count — pushed by refreshSceneExtent and rebuildRows so the
+// flipped Y mapping (highest track index at visual top) can invert.
+inline int& timelineTrackCountRef()
+{
+    static int n = 1;
+    return n;
+}
+inline int timelineTrackCount() { return timelineTrackCountRef(); }
+
 inline double scenePxPerTick()   { return kScenePxPerTickAt1x   * timelineZoomX(); }
 inline double scenePxPerSecond() { return kScenePxPerSecondAt1x * timelineZoomX(); }
 
@@ -55,8 +64,15 @@ inline Tick sceneXToTick(double x) {
 }
 
 // Y position (scene units) of the top edge of a given track row.
+// The mapping is FLIPPED so that the highest track index (= topmost
+// compositor layer) sits at the visual top of the timeline, just below the
+// ruler.  Track 0 (bottom of the layer stack) ends up at the bottom of the
+// timeline view.  This matches the standard NLE "look down at the stack"
+// convention (After Effects, Premiere, etc.).
 inline double trackTopY(int trackIndex) {
-    return kRulerHeight + trackIndex * (kTrackHeight + kTrackGap);
+    const int n = timelineTrackCount();
+    const int visualRow = (n > 0) ? (n - 1 - trackIndex) : 0;
+    return kRulerHeight + visualRow * (kTrackHeight + kTrackGap);
 }
 
 // Inverse of trackTopY — returns the track index whose row contains y, or
@@ -64,7 +80,9 @@ inline double trackTopY(int trackIndex) {
 inline int trackIndexAtY(double y, int numTracks) {
     if (y < kRulerHeight) return -1;
     const double relY = y - kRulerHeight;
-    const int idx = static_cast<int>(relY / (kTrackHeight + kTrackGap));
+    const int visualRow = static_cast<int>(relY / (kTrackHeight + kTrackGap));
+    // Flip back: visualRow 0 = top = highest track index.
+    const int idx = (numTracks - 1) - visualRow;
     if (idx < 0 || idx >= numTracks) return -1;
     return idx;
 }

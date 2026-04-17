@@ -1,5 +1,4 @@
 #pragma once
-#include <QSet>
 
 // =============================================================================
 // GlobalEncodeParams — Encoder-level parameters applied to the ENTIRE encode.
@@ -154,11 +153,8 @@ struct GlobalEncodeParams {
     bool  qblurEnabled        = false;
     float qblur               = 0.5f;   // 0.0 .. 10.0
 
-    // ── Spatial mask (from MB painter) ────────────────────────────────────────
-    //  If non-empty, an additional QP ROI is applied to these MBs on EVERY frame.
-    //  Bridges the MB painter's spatial selection into the global encode pass.
-    QSet<int> spatialMaskMBs;  // MB indices (row*mbCols+col); empty = no mask
-    int       spatialMaskQP = 51; // QP offset applied to masked MBs each frame
+    // C++20 defaulted equality — used by the Scope C undo debouncer.
+    bool operator==(const GlobalEncodeParams&) const = default;
 };
 
 // =============================================================================

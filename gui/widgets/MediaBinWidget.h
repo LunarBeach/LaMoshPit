@@ -3,7 +3,7 @@
 // =============================================================================
 // MediaBinWidget — imported-video catalog + render-iteration browser.
 //
-// Scans the `imported_videos/` folder (relative to the app's working dir) and
+// Scans the `MoshVideoFolder/` folder (relative to the app's working dir) and
 // presents it as a two-level tree:
 //
 //     foo_imported.mp4              ← root (original import)
@@ -39,15 +39,15 @@ class MediaBinWidget : public QWidget {
     Q_OBJECT
 
 public:
-    // importedVideosDir: the project's imported_videos/ root to scan.
+    // moshVideoFolder: the project's MoshVideoFolder/ root to scan.
     // thumbnailsDir: optional — if non-empty, tree items look up icons at
     // {thumbnailsDir}/{videoFileName}.png.  Kept pluggable so a future bin
     // could use a different thumbnail location (e.g. AppData cache).
-    explicit MediaBinWidget(const QString& importedVideosDir,
+    explicit MediaBinWidget(const QString& moshVideoFolder,
                             const QString& thumbnailsDir = QString(),
                             QWidget* parent = nullptr);
 
-    // Rescan the imported_videos/ folder and rebuild the tree.  Called on
+    // Rescan the MoshVideoFolder/ folder and rebuild the tree.  Called on
     // construction, on manual Refresh, after imports, and after renders.
     void refresh();
 
@@ -84,7 +84,7 @@ private:
     // Absolute path of the file backing a tree item (stored in UserRole).
     static QString pathOf(QTreeWidgetItem* item);
 
-    QString        m_importedVideosDir;  // absolute path to imported_videos/
+    QString        m_moshVideoFolder;    // absolute path to MoshVideoFolder/
     QString        m_thumbnailsDir;      // absolute path to thumbnails/ (or empty)
     QTreeWidget*   m_tree       { nullptr };
     QPushButton*   m_btnImport  { nullptr };

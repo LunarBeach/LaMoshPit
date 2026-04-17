@@ -10,6 +10,8 @@
 #include "widgets/ProgressPanel.h"
 #include "sequencer/SequencerDock.h"
 #include "core/sequencer/SequencerProject.h"
+#include "gui/undo/UndoController.h"
+#include "gui/undo/EditorCommands.h"
 #include "SettingsDialog.h"
 #include "gui/dialogs/ImportSelectionMapDialog.h"
 #include "BitstreamAnalyzer.h"
@@ -124,7 +126,7 @@ MainWindow::MainWindow(QWidget *parent)
             m_project = Project::create(QDir(root).filePath(name), name, createErr);
             if (!m_project) {
                 // Last-ditch: can't create in Documents, fall back to CWD.
-                // App still works, bin shows whatever imported_videos/ has.
+                // App still works, bin shows whatever MoshVideoFolder/ has.
                 m_project = Project::create(
                     QDir::currentPath() + "/Untitled_" +
                     QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"),
@@ -144,6 +146,58 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_seqDock, &sequencer::SequencerDock::renderRequested,
             this,      &MainWindow::onNleRenderRequested);
 
+    // Sequencer edits (add track / drop clip / trim / etc.) dirty the active
+    // project so the title's "*" indicator reflects reality.  fromJson also
+    // emits projectChanged() — that path calls clearDirty() after loading so
+    // the spurious mark is reset to match disk state.
+    connect(m_seqProject, &sequencer::SequencerProject::projectChanged,
+            this, [this]() { if (m_project) m_project->markDirty(); });
+
+    // Scope C — single application-wide undo/redo stack.  Reads the max
+    // depth from Settings; every executed command marks the active project
+    // dirty.  Cleared on project switch so history doesn't leak across
+    // projects (see setActiveProject).
+    m_undoController = std::make_unique<undo::UndoController>(this);
+    m_undoController->setMaxSteps(SettingsDialog::maxUndoStepsMBEditor());
+    // Push the sequencer's own cap too — NLE sequencer has an independent
+    // undo stack scoped to its dock's focus; see SequencerProject and
+    // SequencerDock's Ctrl+Z shortcuts.
+    if (m_seqProject)
+        m_seqProject->setMaxUndoSteps(SettingsDialog::maxUndoStepsSequencer());
+    connect(m_undoController.get(), &undo::UndoController::commandExecuted,
+            this, [this]() {
+                if (m_project) m_project->markDirty();
+                // Any command execution (redo/undo/execute) replaces widget
+                // state with a known snapshot — update the cache so the next
+                // diff uses the correct baseline.
+                syncLastKnownToWidgets();
+            });
+
+    // Debounce timers for Scope C MB / GP edit commits.  Single-shot; the
+    // onEdit slot start()s them (which restarts if already running), so a
+    // rapid knob drag emits many editCommitted signals but the debouncer
+    // fires once at the end.
+    m_mbCommitTimer = new QTimer(this);
+    m_mbCommitTimer->setSingleShot(true);
+    m_mbCommitTimer->setInterval(200);
+    connect(m_mbCommitTimer, &QTimer::timeout,
+            this, &MainWindow::commitMBEditIfChanged);
+
+    m_gpCommitTimer = new QTimer(this);
+    m_gpCommitTimer->setSingleShot(true);
+    m_gpCommitTimer->setInterval(200);
+    connect(m_gpCommitTimer, &QTimer::timeout,
+            this, &MainWindow::commitGPIfChanged);
+
+    if (m_mbWidget) {
+        connect(m_mbWidget, &MacroblockWidget::editCommitted,
+                this, &MainWindow::onMBEditCommitted);
+    }
+    if (m_globalParams) {
+        connect(m_globalParams, &GlobalParamsWidget::paramsChanged,
+                this, &MainWindow::onGPParamsChanged);
+    }
+
     applyDefaultLayout();
     {
         QSettings settings("LaMoshPit", "LaMoshPit");
@@ -158,9 +212,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     buildMenuBar();
 
-    const QString title = QString("LaMoshPit \u2014 %1")
-        .arg(m_project ? m_project->name() : "(no project)");
-    setWindowTitle(title);
+    updateWindowTitle();
     statusBar()->showMessage("LaMoshPit — Ready for chaos");
 }
 
@@ -278,13 +330,13 @@ void MainWindow::buildLayout()
     m_preview  = new PreviewPlayer(nullptr);
     m_mbWidget = new MacroblockWidget(nullptr);
 
-    const QString importedVideosDir = m_project
-        ? m_project->importedVideosDir()
-        : QDir::currentPath() + "/imported_videos";
+    const QString moshVideoFolder = m_project
+        ? m_project->moshVideoFolder()
+        : QDir::currentPath() + "/MoshVideoFolder";
     const QString thumbnailsDir = m_project
         ? m_project->thumbnailsDir()
         : QString();
-    m_mediaBin     = new MediaBinWidget(importedVideosDir, thumbnailsDir, nullptr);
+    m_mediaBin     = new MediaBinWidget(moshVideoFolder, thumbnailsDir, nullptr);
     m_quickMosh    = new QuickMoshWidget(nullptr);
     m_globalParams = new GlobalParamsWidget(nullptr);
     m_progressPanel = new ProgressPanel(nullptr);
@@ -359,13 +411,10 @@ void MainWindow::buildLayout()
     connect(m_timeline, &TimelineWidget::frameReorderRequested,
             this, &MainWindow::onFrameReorderRequested);
 
-    // Ctrl+Z: load the nearest older version of the current video from its
-    // family's vNN siblings.  Replaces the former single-level shadow-file
-    // undo — gives effectively unlimited "go back" via the Media Bin's
-    // accumulated iterations.  See onLoadPreviousVersion + VersionPathUtil.
-    auto* undoShortcut = new QShortcut(QKeySequence::Undo, this);
-    connect(undoShortcut, &QShortcut::activated,
-            this, &MainWindow::onLoadPreviousVersion);
+    // Ctrl+Z / Ctrl+Shift+Z are now the unified application undo/redo
+    // (Scope C).  The Edit menu actions carry the shortcuts — see
+    // buildMenuBar.  "Load previous render version" is now a menu-only
+    // action (no shortcut).
 }
 
 // =============================================================================
@@ -388,7 +437,7 @@ void MainWindow::buildMenuBar()
                         QKeySequence("Ctrl+Shift+S"));
     fileMenu->addSeparator();
     // Multi-file import.  Each selected file is transcoded via DecodePipeline
-    // and lands in the active project's imported_videos/ subdir.
+    // and lands in the active project's MoshVideoFolder/ subdir.
     fileMenu->addAction("&Import Videos...", this, &MainWindow::openFile,
                         QKeySequence("Ctrl+O"));
     fileMenu->addAction("Import Selection &Map...", this,
@@ -400,11 +449,49 @@ void MainWindow::buildMenuBar()
     fileMenu->addSeparator();
     fileMenu->addAction("S&ettings...", this, [this]() {
         SettingsDialog dlg(this);
-        if (dlg.exec() == QDialog::Accepted && m_mbWidget) {
-            // Pick up any UI-preference changes (e.g. selection overlay hue).
-            m_mbWidget->refreshSelectionColor();
+        if (dlg.exec() == QDialog::Accepted) {
+            // Pick up any UI-preference changes (selection overlay hue,
+            // max undo depths for both workspaces).
+            if (m_mbWidget) m_mbWidget->refreshSelectionColor();
+            if (m_undoController)
+                m_undoController->setMaxSteps(SettingsDialog::maxUndoStepsMBEditor());
+            if (m_seqProject)
+                m_seqProject->setMaxUndoSteps(SettingsDialog::maxUndoStepsSequencer());
         }
     }, QKeySequence("Ctrl+,"));
+
+    // Edit menu — Scope C unified undo/redo.  The controller owns the
+    // stack; actions here are thin wrappers that call undo()/redo() and
+    // flip enabled-state on stateChanged.  "Load Previous Render Version"
+    // was formerly on Ctrl+Z (replaced by undo) and is now menu-only —
+    // users walking the render-iteration ladder typically do so via the
+    // Media Bin anyway.
+    auto* editMenu = menuBar()->addMenu("&Edit");
+    // The lambdas wrap undo/redo to first flush any pending debounced
+    // commit — otherwise a quick Ctrl+Z right after a knob turn might
+    // see nothing on the stack because the 200 ms debounce hasn't fired.
+    QAction* undoAct = editMenu->addAction("&Undo", this, [this]() {
+        flushPendingCommits();
+        m_undoController->undo();
+    }, QKeySequence::Undo);
+    QAction* redoAct = editMenu->addAction("&Redo", this, [this]() {
+        flushPendingCommits();
+        m_undoController->redo();
+    });
+    // Bind both Ctrl+Shift+Z (standard on Linux/Mac, user-requested) and
+    // Ctrl+Y (Windows convention) so either habit works.
+    redoAct->setShortcuts({ QKeySequence("Ctrl+Shift+Z"),
+                            QKeySequence("Ctrl+Y") });
+    undoAct->setEnabled(m_undoController->canUndo());
+    redoAct->setEnabled(m_undoController->canRedo());
+    connect(m_undoController.get(), &undo::UndoController::stateChanged,
+            this, [this, undoAct, redoAct]() {
+                undoAct->setEnabled(m_undoController->canUndo());
+                redoAct->setEnabled(m_undoController->canRedo());
+            });
+    editMenu->addSeparator();
+    editMenu->addAction("Load Previous Render Version", this,
+                        &MainWindow::onLoadPreviousVersion);
 
     // View menu — KDDW docks expose toggleAction() (auto-synced with dock
     // open/close state, floating, tab-grouping). The NLE sequencer is still
@@ -600,7 +687,7 @@ void MainWindow::openFile()
     // Batch import: user can select 1 or N files; we process them serially so
     // a single splash + progress bar drives the whole operation.  Each file
     // transcodes through DecodePipeline, lands in the project's
-    // imported_videos/, and then gets a thumbnail generated before we move
+    // MoshVideoFolder/, and then gets a thumbnail generated before we move
     // on.  The LAST file to finish becomes the active video.
     const QStringList fileList = QFileDialog::getOpenFileNames(this,
         "Import Video(s)", "",
@@ -608,7 +695,7 @@ void MainWindow::openFile()
 
     if (fileList.isEmpty()) return;
 
-    QDir importDir(m_project->importedVideosDir());
+    QDir importDir(m_project->moshVideoFolder());
     if (!importDir.exists()) importDir.mkpath(".");
 
     // ── Splash dialog ─────────────────────────────────────────────────────────
@@ -748,16 +835,14 @@ void MainWindow::openFile()
             splash->close();
 
             if (!batch->lastOutputPath.isEmpty()) {
-                m_currentVideoPath = batch->lastOutputPath;
-                const QString name = QFileInfo(m_currentVideoPath).fileName();
+                const QString newPath = batch->lastOutputPath;
+                const QString name = QFileInfo(newPath).fileName();
                 statusBar()->showMessage(
                     QString("Imported %1 file%2 \u2014 loading %3 ...")
                         .arg(batch->successCount)
                         .arg(batch->successCount == 1 ? "" : "s")
                         .arg(name));
-                m_preview->loadVideo(m_currentVideoPath);
-                m_videoSequence->load(m_currentVideoPath);
-                analyzeImportedVideo(m_currentVideoPath);
+                switchActiveClip(newPath);
                 if (m_project) {
                     m_project->setActiveVideo(m_currentVideoPath);
                     QString saveErr; m_project->save(saveErr);
@@ -2932,32 +3017,59 @@ void MainWindow::setActiveProject(std::unique_ptr<Project> p)
 {
     if (!p) return;
 
+    // Stash the outgoing clip's in-flight edits INTO the outgoing project
+    // before we replace it — keeps "unsaved state on project A" alive when
+    // the user bounces over to project B and back.  Caller decides whether
+    // to actually save; we only guarantee the in-memory capture so the
+    // data isn't dropped on the floor during project switch.
+    if (m_project && !m_currentVideoPath.isEmpty()) {
+        const QString key = m_project->compressToTokens(m_currentVideoPath);
+        m_project->setClipEditJson(key, captureCurrentClipEdits());
+    }
+
+    // Clear the sequencer too — its tracks/clips belong to the outgoing
+    // project and shouldn't leak into the new one.  Serialisation (Phase 6)
+    // will restore the incoming project's sequencer state.
+    if (m_seqProject) m_seqProject->clear();
+
+    // Clear the undo stack — commands hold raw pointers to widgets and
+    // captured state that belongs to the outgoing project.  Applying them
+    // to the incoming project's widget content would be nonsensical.
+    if (m_undoController) m_undoController->clear();
+
     // Remember the new project's folder for next-launch resume.
     QSettings settings("LaMoshPit", "LaMoshPit");
     settings.setValue("project/lastOpened", p->folderPath());
 
     // Tear down current video state — about to re-point at a different
-    // imported_videos folder and the currently-loaded video almost certainly
+    // MoshVideoFolder and the currently-loaded video almost certainly
     // isn't in the new project.
     m_preview->unloadVideo();
     m_currentVideoPath.clear();
     m_lastAnalysis = AnalysisReport();
 
+    // Clear the MB grid canvas synchronously so the outgoing project's last
+    // frame + painted selection don't linger while the new project either
+    // resolves its active video (async analyze) or settles on "no video".
+    if (m_mbWidget) m_mbWidget->setVideo(QString(), AnalysisReport{});
+
     m_project = std::move(p);
-    setWindowTitle(QString("LaMoshPit \u2014 %1").arg(m_project->name()));
+    connect(m_project.get(), &Project::dirtyChanged,
+            this, [this](bool){ updateWindowTitle(); });
+    updateWindowTitle();
 
     if (m_mbWidget) {
-        m_mbWidget->setProjectPaths(m_project->importedVideosDir(),
+        m_mbWidget->setProjectPaths(m_project->moshVideoFolder(),
                                     m_project->selectionMapsDir());
     }
 
-    // Re-root the bin on the new project's imported_videos, then load the
+    // Re-root the bin on the new project's MoshVideoFolder, then load the
     // project's remembered active video if it still exists on disk.
     // MediaBinWidget is constructed with a fixed root, so we swap the inner
     // widget of the dock for a fresh instance pointed at the new project.
     if (m_mediaBin && m_mediaBinDock) {
         auto* oldBin = m_mediaBin;
-        m_mediaBin = new MediaBinWidget(m_project->importedVideosDir(),
+        m_mediaBin = new MediaBinWidget(m_project->moshVideoFolder(),
                                         m_project->thumbnailsDir(),
                                         nullptr);
         connect(m_mediaBin, &MediaBinWidget::videoSelected,
@@ -2968,17 +3080,29 @@ void MainWindow::setActiveProject(std::unique_ptr<Project> p)
         oldBin->deleteLater();
     }
 
+    // Restore the sequencer + router state saved with the project, if any.
+    // Missing sections (v1 projects, or freshly-created v2 projects that
+    // have never held sequencer content) no-op — the subsystems keep their
+    // post-clear() defaults.  Restoring BEFORE resumePath so the sequencer
+    // is coherent when the user sees the dock's first frame.
+    if (m_seqProject)
+        m_seqProject->fromJson(m_project->sequencerStateJson(), *m_project);
+    if (m_seqDock)
+        m_seqDock->routerConfigFromJson(m_project->frameRouterStateJson());
+
     const QString resumePath = m_project->activeVideo();
     if (!resumePath.isEmpty() && QFile::exists(resumePath)) {
-        m_currentVideoPath = resumePath;
-        m_preview->loadVideo(m_currentVideoPath);
-        m_videoSequence->load(m_currentVideoPath);
-        analyzeImportedVideo(m_currentVideoPath);
-        if (m_mediaBin) m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+        switchActiveClip(resumePath);
     } else {
         // No active video or it's gone — clear the timeline / MB editor.
         populateTimeline(AnalysisReport{});
     }
+
+    // Project just loaded from disk — state and disk are in sync.  Capture/
+    // restore calls on the way here may have flipped the dirty flag via
+    // markDirty(); reset so the title starts clean.
+    m_project->clearDirty();
+    updateWindowTitle();
 
     statusBar()->showMessage("Project: " + m_project->name());
 }
@@ -3021,13 +3145,35 @@ void MainWindow::onOpenProject()
     setActiveProject(std::move(project));
 }
 
+bool MainWindow::saveActiveProject(QString& errorMsg)
+{
+    if (!m_project) { errorMsg = QStringLiteral("No active project"); return false; }
+
+    // Snapshot the current active video so next open restores it.
+    m_project->setActiveVideo(m_currentVideoPath);
+
+    // Capture in-flight state from the live subsystems into Project so
+    // save() picks it up:
+    //   - Current clip's MB edits + Global Encode Params knobs
+    //   - SequencerProject tracks / clips / loop / FPS / active track
+    //   - FrameRouter transition + hotkey config
+    if (!m_currentVideoPath.isEmpty()) {
+        const QString key = m_project->compressToTokens(m_currentVideoPath);
+        m_project->setClipEditJson(key, captureCurrentClipEdits());
+    }
+    if (m_seqProject)
+        m_project->setSequencerStateJson(m_seqProject->toJson(*m_project));
+    if (m_seqDock)
+        m_project->setFrameRouterStateJson(m_seqDock->routerConfigToJson());
+
+    return m_project->save(errorMsg);
+}
+
 void MainWindow::onSaveProject()
 {
     if (!m_project) return;
-    // Snapshot the current active video so next open restores it.
-    m_project->setActiveVideo(m_currentVideoPath);
     QString err;
-    if (m_project->save(err))
+    if (saveActiveProject(err))
         statusBar()->showMessage("Project saved: " + m_project->name());
     else
         QMessageBox::warning(this, "Save Failed", err);
@@ -3045,7 +3191,7 @@ void MainWindow::onImportSelectionMap()
     }
     // No pre-selected clip when invoked from the File menu — the user
     // picks both the map and the target clip inside the dialog.
-    ImportSelectionMapDialog dlg(m_project->importedVideosDir(),
+    ImportSelectionMapDialog dlg(m_project->moshVideoFolder(),
                                  m_project->selectionMapsDir(),
                                  QString(), this);
     if (dlg.exec() == QDialog::Accepted) {
@@ -3067,7 +3213,7 @@ void MainWindow::onImportSelectionMap()
 //   3. We land here — fill in globalParams from the live mosh-editor panel
 //      if the user chose "Libx264FromGlobal", spawn the worker on a
 //      QThread, drive the main progress bar, and on completion handle the
-//      optional import-back to the project's imported_videos/ folder.
+//      optional import-back to the project's MoshVideoFolder/ folder.
 //
 // Runs in parallel with everything else — users can keep editing the
 // timeline while a render is in progress; the worker snapshots the Params
@@ -3129,11 +3275,11 @@ void MainWindow::onNleRenderRequested(const sequencer::SequencerRenderer::Params
         }
 
         // If the output landed outside the project and the user asked for
-        // import-back, copy it into imported_videos/.  The file is already
+        // import-back, copy it into MoshVideoFolder/.  The file is already
         // clean H.264/MP4; no re-transcode needed.
         QString inProjectPath;
         if (importIntoProject && m_project) {
-            const QString importsDir = m_project->importedVideosDir();
+            const QString importsDir = m_project->moshVideoFolder();
             const QString outDir     = QFileInfo(outPath).absolutePath();
             if (QDir(outDir).absolutePath() != QDir(importsDir).absolutePath()) {
                 const QString base  = QFileInfo(outPath).completeBaseName();
@@ -3202,7 +3348,7 @@ void MainWindow::onLoadPreviousVersion()
 // =============================================================================
 //
 // The bin emits this when the user double-clicks or picks "Load" from the
-// context menu.  Videos are already in imported_videos/ and have been
+// context menu.  Videos are already in MoshVideoFolder/ and have been
 // analyzable since their creation, so we skip the DecodePipeline transcode
 // that openFile() would run and go straight to the load + analyze pipeline
 // that openFile()'s completion callback uses.  A bin selection while a
@@ -3214,15 +3360,8 @@ void MainWindow::onMediaBinVideoSelected(const QString& videoPath)
         statusBar()->showMessage("Render in progress — ignoring bin selection.");
         return;
     }
-    if (videoPath.isEmpty() || !QFile::exists(videoPath)) return;
-    if (videoPath == m_currentVideoPath) return;  // already loaded
-
-    m_currentVideoPath = videoPath;
     statusBar()->showMessage("Loading: " + QFileInfo(videoPath).fileName());
-    m_preview->loadVideo(m_currentVideoPath);
-    m_videoSequence->load(m_currentVideoPath);
-    analyzeImportedVideo(m_currentVideoPath);
-    if (m_mediaBin) m_mediaBin->setCurrentVideoPath(m_currentVideoPath);
+    switchActiveClip(videoPath);
 }
 
 // =============================================================================
@@ -3325,11 +3464,224 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e)
 }
 
 // =============================================================================
-// closeEvent — persist the current dock layout + window geometry so the next
-// launch resumes in the same arrangement.
+// Per-clip edit capture / apply — Scope B implementation of the workflow
+// "switch away from clip A, work on clip B, come back to A and all knob /
+// selection changes from before are still there".  Serialisation uses the
+// same json codecs PresetManager uses for its on-disk presets so the shape
+// is reused rather than reinvented.
+// =============================================================================
+QJsonObject MainWindow::captureCurrentClipEdits() const
+{
+    QJsonObject state;
+    state["version"] = 1;
+
+    QJsonObject mbObj;
+    if (m_mbWidget) {
+        const MBEditMap& edits = m_mbWidget->editMap();
+        for (auto it = edits.begin(); it != edits.end(); ++it) {
+            mbObj[QString::number(it.key())] =
+                PresetManager::mbToJson(it.value());
+        }
+    }
+    state["mbEdits"] = mbObj;
+
+    if (m_globalParams) {
+        state["globalParams"] =
+            PresetManager::gpToJson(m_globalParams->currentParams());
+    }
+    return state;
+}
+
+void MainWindow::applyClipEdits(const QJsonObject& state)
+{
+    if (state.isEmpty()) return;
+
+    if (m_mbWidget) {
+        const QJsonObject mbObj = state.value("mbEdits").toObject();
+        MBEditMap edits;
+        for (auto it = mbObj.begin(); it != mbObj.end(); ++it) {
+            bool ok = false;
+            const int frameIdx = it.key().toInt(&ok);
+            if (!ok) continue;
+            edits[frameIdx] = PresetManager::jsonToMB(it.value().toObject());
+        }
+        m_mbWidget->loadEditMap(edits);
+    }
+
+    if (m_globalParams && state.contains("globalParams")) {
+        m_globalParams->setParams(
+            PresetManager::jsonToGP(state.value("globalParams").toObject()));
+    }
+}
+
+// =============================================================================
+// switchActiveClip — user-initiated clip-swap.  Creates a ClipSwitchCommand
+// so Ctrl+Z can walk back through clip swaps, then delegates the mechanical
+// work to switchActiveClipDirect (which the command's redo/undo also call).
+// First-load scenarios (no outgoing clip, or no controller yet) bypass
+// command creation because there's no previous state to undo into.
+// =============================================================================
+void MainWindow::switchActiveClip(const QString& newPath)
+{
+    if (newPath.isEmpty() || !QFile::exists(newPath)) return;
+    if (newPath == m_currentVideoPath) return;
+
+    if (m_currentVideoPath.isEmpty() || !m_undoController) {
+        switchActiveClipDirect(newPath);
+        return;
+    }
+
+    // Flush any pending debounced MB/GP edits into their own commands
+    // BEFORE the clip switch lands on the stack.  Otherwise a knob turn
+    // immediately followed by a bin click would collapse into the clip
+    // switch command, losing per-edit granularity on undo.
+    flushPendingCommits();
+
+    m_undoController->execute(std::make_unique<undo::ClipSwitchCommand>(
+        this, m_currentVideoPath, newPath));
+}
+
+// =============================================================================
+// Scope C undo-debouncer slots
+// =============================================================================
+
+void MainWindow::syncLastKnownToWidgets()
+{
+    if (m_mbWidget)     m_lastKnownMBEdits = m_mbWidget->editMap();
+    if (m_globalParams) m_lastKnownGP      = m_globalParams->currentParams();
+}
+
+void MainWindow::onMBEditCommitted()
+{
+    if (m_mbCommitTimer) m_mbCommitTimer->start();
+}
+
+void MainWindow::commitMBEditIfChanged()
+{
+    if (!m_mbWidget || !m_undoController) return;
+    MBEditMap live = m_mbWidget->editMap();
+    if (live == m_lastKnownMBEdits) return;
+    auto cmd = std::make_unique<undo::MBEditMapReplaceCommand>(
+        m_mbWidget, m_lastKnownMBEdits, live);
+    // Skip the execute's cmd->redo() — widgets are already in the "after"
+    // state; just seat the command on the stack.  Emit commandExecuted
+    // manually so dirty-tracking / syncLastKnown fire as usual.
+    // Easiest implementation: call execute() but our redo() is idempotent
+    // (loadEditMap(after) when widgets are already at 'after' is a no-op
+    // beyond re-emitting loadKnobsFromCurrentFrame — harmless).
+    m_undoController->execute(std::move(cmd));
+    // execute()'s commandExecuted signal re-triggers syncLastKnownToWidgets
+    // which sets m_lastKnownMBEdits = live.  No extra work needed.
+}
+
+void MainWindow::onGPParamsChanged()
+{
+    if (m_gpCommitTimer) m_gpCommitTimer->start();
+}
+
+void MainWindow::commitGPIfChanged()
+{
+    if (!m_globalParams || !m_undoController) return;
+    GlobalEncodeParams live = m_globalParams->currentParams();
+    if (live == m_lastKnownGP) return;
+    auto cmd = std::make_unique<undo::GlobalParamsReplaceCommand>(
+        m_globalParams, m_lastKnownGP, live);
+    m_undoController->execute(std::move(cmd));
+}
+
+void MainWindow::flushPendingCommits()
+{
+    if (m_mbCommitTimer && m_mbCommitTimer->isActive()) {
+        m_mbCommitTimer->stop();
+        commitMBEditIfChanged();
+    }
+    if (m_gpCommitTimer && m_gpCommitTimer->isActive()) {
+        m_gpCommitTimer->stop();
+        commitGPIfChanged();
+    }
+}
+
+// =============================================================================
+// switchActiveClipDirect — mechanical clip swap.  Same contract as the old
+// switchActiveClip pre-Scope-C: captures outgoing in-flight edits into
+// Project, runs the analyze/load pipeline, restores stashed incoming edits.
+// Called directly for first-load scenarios and by ClipSwitchCommand on
+// every redo/undo.  Does NOT create an undo command — that would recurse.
+// =============================================================================
+void MainWindow::switchActiveClipDirect(const QString& newPath)
+{
+    if (newPath.isEmpty() || !QFile::exists(newPath)) return;
+    if (newPath == m_currentVideoPath) return;
+
+    // 1. Snapshot the outgoing clip's in-flight edits.
+    if (m_project && !m_currentVideoPath.isEmpty()) {
+        const QString key = m_project->compressToTokens(m_currentVideoPath);
+        m_project->setClipEditJson(key, captureCurrentClipEdits());
+    }
+
+    // 2. Standard load — preview / sequence / analyze (which drives the MB
+    // editor's setVideo, clearing its in-memory edit map).
+    m_currentVideoPath = newPath;
+    if (m_preview)       m_preview->loadVideo(newPath);
+    if (m_videoSequence) m_videoSequence->load(newPath);
+    analyzeImportedVideo(newPath);
+
+    // 3. Re-hydrate any stashed edits for the incoming clip.  If there's
+    // nothing stashed, the widgets keep the fresh-state they got from step 2.
+    if (m_project) {
+        const QString key = m_project->compressToTokens(newPath);
+        if (m_project->hasClipEdit(key))
+            applyClipEdits(m_project->clipEditJson(key));
+    }
+
+    if (m_mediaBin) m_mediaBin->setCurrentVideoPath(newPath);
+
+    // Update the undo-tracking cache so the next user edit diffs against
+    // the freshly-loaded state (not leftovers from the outgoing clip).
+    syncLastKnownToWidgets();
+}
+
+// =============================================================================
+// updateWindowTitle — compose from m_project + dirty flag.  Prepends "* "
+// when the active project has unsaved changes (Qt/Windows convention).
+// =============================================================================
+void MainWindow::updateWindowTitle()
+{
+    const QString name = m_project ? m_project->name() : QStringLiteral("(no project)");
+    const bool dirty   = m_project && m_project->isDirty();
+    const QString prefix = dirty ? QStringLiteral("* ") : QString();
+    setWindowTitle(QString("%1LaMoshPit \u2014 %2").arg(prefix, name));
+}
+
+// =============================================================================
+// closeEvent — if there are unsaved changes, prompt Save / Discard / Cancel
+// before closing; then persist the current dock layout + window geometry so
+// the next launch resumes in the same arrangement.
 // =============================================================================
 void MainWindow::closeEvent(QCloseEvent* e)
 {
+    if (m_project && m_project->isDirty()) {
+        const auto reply = QMessageBox::question(this,
+            QStringLiteral("Unsaved Changes"),
+            QStringLiteral("The project \"%1\" has unsaved changes.\n\n"
+                           "Save before closing?").arg(m_project->name()),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (reply == QMessageBox::Cancel) {
+            e->ignore();
+            return;
+        }
+        if (reply == QMessageBox::Save) {
+            QString err;
+            if (!saveActiveProject(err)) {
+                QMessageBox::warning(this, QStringLiteral("Save Failed"), err);
+                e->ignore();
+                return;
+            }
+        }
+        // Discard falls through to close without saving.
+    }
+
     QSettings settings("LaMoshPit", "LaMoshPit");
     KDDockWidgets::LayoutSaver saver;
     settings.setValue("layout/kddwLayout",   saver.serializeLayout());
