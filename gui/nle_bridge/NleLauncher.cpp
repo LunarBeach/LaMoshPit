@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QStringList>
 
 #ifdef _WIN32
@@ -117,6 +118,45 @@ bool NleLauncher::launch(const QString& ipcPipeName)
     // On Windows, set the working directory to the NLE's own directory
     // so its relative DLL/runtime-asset searches resolve correctly.
     m_process->setWorkingDirectory(QFileInfo(exePath).absolutePath());
+
+#ifdef _WIN32
+    // DEV-MODE DLL RESOLUTION.
+    // The NLE is MinGW-built and links against libstdc++-6.dll,
+    // libgcc_s_seh-1.dll, libmlt++-7.dll, libmlt-7.dll, etc. — all of
+    // which live in C:\msys64\mingw64\bin.  LaMoshPit.exe is normally
+    // launched from cmd/Explorer with the system PATH, which does NOT
+    // contain that directory, so QProcess inheritance of our PATH
+    // leaves the NLE unable to find its own DLLs.
+    //
+    // We prepend the MinGW bin dir to the child's PATH here.  Candidate
+    // directories searched in order:
+    //   1) %LAMOSH_MINGW64_BIN% env override (dev can point elsewhere)
+    //   2) C:\msys64\mingw64\bin (default MSYS2 install)
+    //   3) C:\mingw64\bin (standalone MinGW installs)
+    // First one that exists wins.  In Phase 1 Step 12 this will be
+    // replaced by a windeployqt-style bundle in <install>/nle/.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QStringList mingwCandidates = {
+        env.value(QStringLiteral("LAMOSH_MINGW64_BIN")),
+        QStringLiteral("C:\\msys64\\mingw64\\bin"),
+        QStringLiteral("C:\\mingw64\\bin"),
+    };
+    QString mingwBin;
+    for (const QString& c : mingwCandidates) {
+        if (!c.isEmpty() && QDir(c).exists()) { mingwBin = c; break; }
+    }
+    if (mingwBin.isEmpty()) {
+        qWarning() << "[launcher] MinGW runtime bin dir not found; NLE will "
+                      "likely fail to load libstdc++-6.dll / libmlt-7.dll. "
+                      "Set LAMOSH_MINGW64_BIN to override.";
+    } else {
+        const QString existingPath = env.value(QStringLiteral("PATH"));
+        env.insert(QStringLiteral("PATH"),
+                   mingwBin + QLatin1Char(';') + existingPath);
+        qInfo() << "[launcher] prepended MinGW runtime path for NLE:" << mingwBin;
+    }
+    m_process->setProcessEnvironment(env);
+#endif
 
     m_process->start();
     if (!m_process->waitForStarted(3000)) {
