@@ -25,6 +25,13 @@ echo "=== Step 1/2: updating base MSYS2 ==="
 pacman -Syu --noconfirm
 
 echo "=== Step 2/2: installing MinGW64 toolchain + Qt6 + MLT ==="
+# Notes on package list:
+#   - qt6-declarative ALREADY includes QuickControls2 / QuickTemplates2 /
+#     Qml / Quick; there is no separate qt6-quickcontrols2 package in
+#     MSYS2 (upstream Qt split was not mirrored in MSYS2's packaging).
+#   - SDL2 is a transitive dep of mingw-w64-x86_64-mlt (for its SDL
+#     consumer plugin), so it arrives automatically.  Listing it here
+#     separately was redundant and also case-wrong ("SDL2" vs "sdl2").
 pacman -S --needed --noconfirm \
     mingw-w64-x86_64-toolchain \
     mingw-w64-x86_64-cmake \
@@ -32,7 +39,6 @@ pacman -S --needed --noconfirm \
     mingw-w64-x86_64-pkgconf \
     mingw-w64-x86_64-qt6-base \
     mingw-w64-x86_64-qt6-multimedia \
-    mingw-w64-x86_64-qt6-quickcontrols2 \
     mingw-w64-x86_64-qt6-declarative \
     mingw-w64-x86_64-qt6-svg \
     mingw-w64-x86_64-qt6-tools \
@@ -40,7 +46,6 @@ pacman -S --needed --noconfirm \
     mingw-w64-x86_64-ffmpeg \
     mingw-w64-x86_64-fftw \
     mingw-w64-x86_64-libxml2 \
-    mingw-w64-x86_64-sdl2 \
     git
 
 echo ""
