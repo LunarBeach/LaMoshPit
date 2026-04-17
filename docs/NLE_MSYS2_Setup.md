@@ -117,19 +117,31 @@ Close the window; `cmake --build` returns 0.  Toolchain is green.
 
 ---
 
-## Versions pinned (as of 2026-04-17 install)
+## Versions pinned (installed 2026-04-17 on Mark's workstation)
 
-When Step 1 succeeds, record the versions the script printed at the end
-into this section.  This pins a known-good baseline for future troubleshooting.
-
-*(To be filled in after the sanity test passes.)*
+This is the known-good baseline for every later Phase 1 step.  If your
+MSYS2 install ends up with significantly newer versions of any of these,
+pin down to this set first; newer versions may introduce regressions that
+Shotcut hasn't yet adapted to.
 
 ```
-g++:
-cmake:
-MLT++:
-Qt6Core:
+g++ (MinGW)     : 15.2.0
+cmake           : 4.3.1
+MLT++           : 7.36.0   ← matches Shotcut's minimum required (>=7.36.0)
+Qt6             : 6.11.0   ← same version as the MSVC side (coincidence, not required)
 ```
+
+### Downgrade procedure if a future MSYS2 update breaks something
+
+MSYS2 ships rolling-release packages; `pacman -Syu` will happily pull in
+a newer MLT or Qt6 that might regress the NLE build.  If that happens:
+
+1. Find the last-known-good package archive under
+   `C:\msys64\var\cache\pacman\pkg\` (MSYS2 keeps prior versions).
+2. `pacman -U mingw-w64-x86_64-<pkg>-<old-version>-*.pkg.tar.zst` to
+   roll back to that specific version.
+3. To prevent it creeping back on the next `-Syu`, add the package to
+   `IgnorePkg` in `C:\msys64\etc\pacman.conf`.
 
 ---
 
