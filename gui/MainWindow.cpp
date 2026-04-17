@@ -12,6 +12,8 @@
 #include "core/sequencer/SequencerProject.h"
 #include "gui/undo/UndoController.h"
 #include "gui/undo/EditorCommands.h"
+#include "gui/nle_bridge/NleLauncher.h"
+#include "gui/nle_bridge/NleControlChannel.h"
 #include "SettingsDialog.h"
 #include "gui/dialogs/ImportSelectionMapDialog.h"
 #include "BitstreamAnalyzer.h"
@@ -211,6 +213,53 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     buildMenuBar();
+
+    // ── Two-process NLE bridge (Phase 1 Step 3) ──────────────────────────
+    // Spin up the IPC server, spawn LaMoshPit_NLE.exe, supervise its
+    // lifetime via a Windows Job Object so Task-Manager-killing us also
+    // kills the NLE (no orphan processes).  If the NLE exe isn't present
+    // (developer hasn't run `bash scripts/build-nle-msys2.sh` yet), we
+    // just log a warning and carry on — LaMoshPit.exe still works, just
+    // without the NLE sequencer window.
+    m_nleControl  = std::make_unique<lamosh::NleControlChannel>(this);
+    m_nleLauncher = std::make_unique<lamosh::NleLauncher>(this);
+
+    connect(m_nleControl.get(), &lamosh::NleControlChannel::nleConnected,
+            this, [this]() {
+        statusBar()->showMessage(
+            "LaMoshPit — NLE sequencer connected", 3000);
+    });
+    connect(m_nleControl.get(), &lamosh::NleControlChannel::nleDisconnected,
+            this, [this]() {
+        statusBar()->showMessage(
+            "LaMoshPit — NLE sequencer disconnected", 3000);
+    });
+    connect(m_nleControl.get(), &lamosh::NleControlChannel::eventReceived,
+            this, [this](const QJsonObject& evt) {
+        const QString kind = evt.value(QStringLiteral("evt")).toString();
+        if (kind == QLatin1String("ready")) {
+            const QString ver = evt.value(QStringLiteral("version")).toString();
+            qInfo() << "[nle] ready handshake received, version=" << ver;
+        }
+        // Other events dispatched as Step 4+ features land.
+    });
+    connect(m_nleLauncher.get(), &lamosh::NleLauncher::nleExited,
+            this, [this](int exitCode, bool normal) {
+        if (!normal) {
+            statusBar()->showMessage(
+                QString("NLE sequencer exited unexpectedly (code %1)")
+                    .arg(exitCode), 5000);
+        }
+    });
+
+    {
+        const QString pipeName = m_nleControl->listen();
+        if (pipeName.isEmpty()) {
+            qWarning() << "[nle] could not start IPC server; NLE will not launch";
+        } else if (!m_nleLauncher->launch(pipeName)) {
+            qWarning() << "[nle] launch failed; continuing without NLE";
+        }
+    }
 
     updateWindowTitle();
     statusBar()->showMessage("LaMoshPit — Ready for chaos");

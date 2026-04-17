@@ -73,6 +73,8 @@ pkg_check_modules(MLTPP REQUIRED IMPORTED_TARGET mlt++-7>=7.36.0)
 # ── Executable ──────────────────────────────────────────────────────────────
 add_executable(LaMoshPit_NLE WIN32
     src/main.cpp
+    src/ipc/CoreControlClient.h
+    src/ipc/CoreControlClient.cpp
 )
 
 target_include_directories(LaMoshPit_NLE PRIVATE

@@ -26,7 +26,7 @@ set(CMAKE_AUTOUIC ON)
 # causes runtime "procedure entry point not located" errors.)
 set(CMAKE_PREFIX_PATH "C:/Qt/6.11.0/msvc2022_64")
 set(Qt6_DIR "C:/Qt/6.11.0/msvc2022_64/lib/cmake/Qt6")
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Gui Multimedia MultimediaWidgets Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Gui Multimedia MultimediaWidgets Concurrent Network)
 
 # KDDockWidgets — built in-tree from third_party/KDDockWidgets/ against the
 # same Qt the app links against. Disable the library's own examples / tests
@@ -209,6 +209,9 @@ add_executable(LeeAnnesMoshPit WIN32
     core/sequencer/SequencerRenderer.cpp
     core/util/HwEncoder.cpp
     core/thumbnail/ThumbnailGenerator.cpp
+    # Phase 1 Step 3 — IPC bridge to LaMoshPit_NLE.exe (MinGW NLE process).
+    gui/nle_bridge/NleControlChannel.cpp
+    gui/nle_bridge/NleLauncher.cpp
 )
 
 #Link everything together
@@ -219,6 +222,7 @@ target_link_libraries(LeeAnnesMoshPit PRIVATE
     Qt6::Multimedia
     Qt6::MultimediaWidgets
     Qt6::Concurrent
+    Qt6::Network
     h264bitstream
     spout2_embed
     KDAB::kddockwidgets

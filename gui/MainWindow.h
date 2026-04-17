@@ -33,6 +33,10 @@ namespace sequencer {
 namespace undo {
     class UndoController;
 }
+namespace lamosh {
+    class NleLauncher;
+    class NleControlChannel;
+}
 class QPushButton;
 class QProgressBar;
 class QLabel;
@@ -318,4 +322,12 @@ private:
     // of the post-render crash observed on bitstream-surgery renders.
     FrameTransformerWorker::TargetType m_lastRenderType {
         FrameTransformerWorker::MBEditOnly };
+
+    // ── Two-process NLE bridge (Phase 1 Step 3) ──────────────────────────
+    // We spawn LaMoshPit_NLE.exe as a child process and talk to it over a
+    // QLocalServer named pipe.  Owned here so the process lifetime equals
+    // MainWindow's.  On close, ~NleLauncher's Job Object handle closes
+    // and Windows kernel kills the NLE.  See gui/nle_bridge/NleLauncher.h.
+    std::unique_ptr<lamosh::NleControlChannel> m_nleControl;
+    std::unique_ptr<lamosh::NleLauncher>       m_nleLauncher;
 };
