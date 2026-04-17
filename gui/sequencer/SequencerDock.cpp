@@ -35,11 +35,6 @@
 #include <QFileInfo>
 #include <QThread>
 
-// Match the flag from core/sequencer/SequencerPlaybackClock.cpp.  Set to 0
-// in both places to disable the pacing log.
-#define LAMOSH_TICK_DEBUG_LOG 1
-namespace sequencer { qint64 tickLogWallMs(); } // defined in SequencerPlaybackClock.cpp
-
 namespace sequencer {
 namespace {
 
@@ -629,23 +624,12 @@ void SequencerDock::onStopClicked()
 
 void SequencerDock::onSeekSliderMoved(int value)
 {
-#if LAMOSH_TICK_DEBUG_LOG
-    qDebug() << "[ui] " << tickLogWallMs() << "ms sliderMoved value=" << value;
-#endif
     if (!m_clock) return;
     m_clock->seek(static_cast<Tick>(value));
 }
 
 void SequencerDock::onClockTickAdvanced(Tick tick)
 {
-#if LAMOSH_TICK_DEBUG_LOG
-    static Tick s_lastSliderTick = -1;
-    const bool backward = (s_lastSliderTick >= 0 && tick < s_lastSliderTick);
-    qDebug() << "[ui] " << tickLogWallMs() << "ms slider<-tick=" << tick
-             << (backward ? "BACKWARD_JUMP" : "")
-             << " prev=" << s_lastSliderTick;
-    s_lastSliderTick = tick;
-#endif
     m_seek->blockSignals(true);
     m_seek->setValue(static_cast<int>(tick));
     m_seek->blockSignals(false);

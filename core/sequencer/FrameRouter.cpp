@@ -6,19 +6,10 @@
 #include "core/sequencer/BlendModes.h"
 #include "core/sequencer/ClipEffects.h"
 
-#include <QDebug>
 #include <QReadLocker>
 #include <QThread>
 #include <QtConcurrent/QtConcurrent>
 #include <algorithm>
-
-// Toggle for the pacing log.  Keep in sync with the same flag in
-// SequencerPlaybackClock.cpp — both are part of the playhead-jerks-back
-// investigation.
-#define LAMOSH_TICK_DEBUG_LOG 1
-namespace sequencer {
-qint64 tickLogWallMs();   // defined in SequencerPlaybackClock.cpp
-} // namespace sequencer
 
 namespace sequencer {
 
@@ -346,12 +337,6 @@ void FrameRouter::refreshCurrentFrame()
 
 void FrameRouter::onTickAdvanced(Tick tick)
 {
-#if LAMOSH_TICK_DEBUG_LOG
-    const Tick prev = m_pendingTick.load(std::memory_order_acquire);
-    const bool wasQueued = m_pendingTickQueued.load(std::memory_order_acquire);
-    qDebug() << "[rtr]" << tickLogWallMs() << "ms onTick tick=" << tick
-             << "prevPending=" << prev << "wasQueued=" << wasQueued;
-#endif
     // Coalesce: store the latest tick and ensure exactly one
     // processPendingTick() invocation is queued.  See member declaration
     // for the rationale — in particular, this is what stops the "plays on
@@ -400,19 +385,6 @@ struct TrackSnapshot {
 
 void FrameRouter::processTick(Tick tick)
 {
-#if LAMOSH_TICK_DEBUG_LOG
-    const qint64 __ptStart = tickLogWallMs();
-    qDebug() << "[rtr]" << __ptStart << "ms processTick ENTER tick=" << tick;
-    // RAII guard — logs EXIT regardless of which return path we take.
-    struct ExitLog {
-        Tick t; qint64 startMs;
-        ~ExitLog() {
-            qDebug() << "[rtr]" << tickLogWallMs()
-                     << "ms processTick EXIT tick=" << t
-                     << "wall_dur_ms=" << (tickLogWallMs() - startMs);
-        }
-    } __exitLog { tick, __ptStart };
-#endif
     if (m_chains.isEmpty() || !m_project) return;
 
     const int n = m_chains.size();
@@ -453,11 +425,6 @@ void FrameRouter::processTick(Tick tick)
             if (snap[t].enabled && snap[t].clipIdx >= 0)
                 decodeIdx.append(t);
         }
-#if LAMOSH_TICK_DEBUG_LOG
-        const qint64 __phDec = tickLogWallMs();
-        qDebug() << "[rtr]" << __phDec << "ms LC decode start tracks="
-                 << decodeIdx.size();
-#endif
 
         QVector<QImage> layers(n);
         // Parallel decode: each pool worker touches exactly one chain, so
@@ -474,11 +441,6 @@ void FrameRouter::processTick(Tick tick)
             }
             layers[t] = std::move(tmp);
         });
-#if LAMOSH_TICK_DEBUG_LOG
-        const qint64 __phBlend = tickLogWallMs();
-        qDebug() << "[rtr]" << __phBlend << "ms LC decode end decode_ms="
-                 << (__phBlend - __phDec);
-#endif
 
         QImage accum;
         for (int t = 0; t < n; ++t) {
@@ -499,22 +461,8 @@ void FrameRouter::processTick(Tick tick)
 
             const float alpha = snap[t].clip.effectiveOpacity(tick);
             if (alpha <= 0.0f) continue;
-#if LAMOSH_TICK_DEBUG_LOG
-            const qint64 __bStart = tickLogWallMs();
-#endif
             applyBlend(accum, layer, alpha, snap[t].clip.blendMode);
-#if LAMOSH_TICK_DEBUG_LOG
-            qDebug() << "[rtr]" << tickLogWallMs()
-                     << "ms LC blend track=" << t
-                     << "alpha=" << alpha
-                     << "ms=" << (tickLogWallMs() - __bStart);
-#endif
         }
-
-#if LAMOSH_TICK_DEBUG_LOG
-        qDebug() << "[rtr]" << tickLogWallMs() << "ms LC blend end total_ms="
-                 << (tickLogWallMs() - __phBlend);
-#endif
 
         if (!accum.isNull()) {
             emit frameReady(std::move(accum), tick);

@@ -4,39 +4,10 @@
 #include <QPixmap>
 #include <QTimer>
 #include <QFont>
-#include <QFile>
-#include <QTextStream>
-#include <QMutex>
-#include <QStandardPaths>
-#include <QDir>
 #include <kddockwidgets/KDDockWidgets.h>
 #include <kddockwidgets/Config.h>
 #include "gui/MainWindow.h"
 #include "gui/AppFonts.h"
-
-// =============================================================================
-// Debug log — Windows GUI processes don't reliably reach stderr, and OutputDebugString
-// requires DebugView to capture.  Install a Qt message handler that also
-// appends to a plain text file next to the exe so the user can just read it.
-// Remove this hook once the pacing investigation is done.
-// =============================================================================
-static QFile*    g_dbgLogFile    = nullptr;
-static QMutex    g_dbgLogMutex;
-static QtMessageHandler g_prevHandler = nullptr;
-
-static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
-                                const QString& msg)
-{
-    if (g_prevHandler) g_prevHandler(type, ctx, msg);
-    QMutexLocker lock(&g_dbgLogMutex);
-    if (!g_dbgLogFile) return;
-    // Write+flush directly via QFile — QTextStream has its own internal
-    // buffer that isn't automatically flushed when we flush the QFile,
-    // which caused messages to be lost during earlier diagnostic runs.
-    const QByteArray bytes = msg.toUtf8() + '\n';
-    g_dbgLogFile->write(bytes);
-    g_dbgLogFile->flush();
-}
 
 // =============================================================================
 // Global application stylesheet — modern dark video-editor look.
@@ -241,23 +212,6 @@ QProgressBar::chunk {
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-
-    // Open the debug log file next to the executable so the user doesn't
-    // have to wrangle shell redirection.  Truncating on each launch so the
-    // log always represents the most recent session.
-    {
-        const QString logPath = QDir(QCoreApplication::applicationDirPath())
-                                    .filePath("tick_log.txt");
-        g_dbgLogFile = new QFile(logPath);
-        if (g_dbgLogFile->open(QIODevice::WriteOnly | QIODevice::Truncate
-                               | QIODevice::Text)) {
-            g_prevHandler = qInstallMessageHandler(fileMessageHandler);
-            qInfo() << "=== LaMoshPit debug log — writing to" << logPath;
-        } else {
-            delete g_dbgLogFile;
-            g_dbgLogFile = nullptr;
-        }
-    }
 
     // Initialise KDDockWidgets for the Qt Widgets frontend. Must happen
     // *before* any KDDW::MainWindow / DockWidget is constructed.
